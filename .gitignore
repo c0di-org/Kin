@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.dev.vars
+.env
+.env.*
+!.dev.vars.example
+src-tauri/target/
+.DS_Store
+*.log
+.wrangler/
+src-tauri/icons/
