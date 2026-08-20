@@ -58,7 +58,7 @@ Then deploy the PWA + relay together:
 npm run deploy
 ```
 
-Production deploys are **Wrangler-only** (`npm run deploy` / `npx wrangler deploy`). GitHub Actions runs CI (install, build, test) and does not deploy, so it cannot race Cloudflare Git integration or a local Wrangler deploy.
+Production is **https://kin.c0di.com** (Workers custom domain). The `*.workers.dev` URL remains as a backup. Deploys are **Wrangler-only** (`npm run deploy` / `npx wrangler deploy`). GitHub Actions runs CI (install, build, test) and does not deploy, so it cannot race Cloudflare Git integration or a local Wrangler deploy.
 
 Cloudflare Workers Static Assets serves `dist/` and the same Worker handles `/api/*`, so there is no CORS setup in production.
 
@@ -71,7 +71,7 @@ On Android/Chromium, use the in-app **Install app** action when the browser expo
 Tauri remains in `src-tauri/` with bundle ID `org.c0di.kin`. For native builds, set `VITE_RELAY_URL` to the deployed HTTPS Worker origin before building so the packaged webview talks to the Cloudflare relay.
 
 ```bash
-VITE_RELAY_URL=https://YOUR-KIN-WORKER.workers.dev npm run tauri build
+VITE_RELAY_URL=https://kin.c0di.com npm run tauri build
 ```
 
 The upstream template has additional Android inset/scaffold tooling that should be retained when this is generated as a real GitHub template repository. The product frontend already keeps the template's platform-geometry bridge.

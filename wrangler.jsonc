@@ -23,5 +23,9 @@
   "r2_buckets": [
     { "binding": "ATTACHMENTS", "bucket_name": "kin-attachments" }
   ],
+  "routes": [
+    { "pattern": "kin.c0di.com", "custom_domain": true }
+  ],
+  "workers_dev": true,
   "observability": { "enabled": true }
 }
