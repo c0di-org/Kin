@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/materialize-icons.mjs",
     "dev": "vite",
     "dev:relay": "wrangler dev",
+    "prebuild": "node scripts/materialize-icons.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run --passWithNoTests",
