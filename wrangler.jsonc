@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kin-family-messenger",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "ConversationRoom" },
+      { "name": "PAIRS", "class_name": "PairingSession" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_classes": ["PairingSession"] },
+    { "tag": "v2", "new_classes": ["ConversationRoom"] }
+  ],
+  "r2_buckets": [
+    { "binding": "ATTACHMENTS", "bucket_name": "kin-attachments" }
+  ],
+  "observability": { "enabled": true }
+}
