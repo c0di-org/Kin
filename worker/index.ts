@@ -142,7 +142,7 @@ export class PairingSession extends DurableObject<Env> {
     }
     if (action === "claim" && request.method === "GET") {
       if (!record.joinerToken || this.bearer(request) !== record.joinerToken) return error("Unauthorized", 401);
-      const pkg = await this.ctx.storage.get<PairPackage>("package"); if (!pkg) return error("Not ready", 409); return json(pkg);
+      const pkg = await this.ctx.storage.get<PairPackage>("package"); if (!pkg) return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } }); return json(pkg);
     }
     return error("Not found", 404);
   }

@@ -47,7 +47,10 @@ export async function completePair(code: string, payload: PairPackage, creatorTo
   await json(`/api/pair/${encodeURIComponent(code)}/complete`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${creatorToken}` }, body: JSON.stringify(payload) });
 }
 export async function claimPair(code: string, claimToken: string): Promise<PairPackage> {
-  return json(`/api/pair/${encodeURIComponent(code)}/claim`, { headers: { Authorization: `Bearer ${claimToken}` } });
+  const res = await fetch(`${base}/api/pair/${encodeURIComponent(code)}/claim`, { headers: { Authorization: `Bearer ${claimToken}` } });
+  if (res.status === 204) throw new Error("Not ready");
+  if (!res.ok) throw new Error((await res.text()) || `${res.status}`);
+  return res.json() as Promise<PairPackage>;
 }
 
 export async function sendEnvelope(roomId: string, envelope: CipherEnvelope): Promise<void> {
