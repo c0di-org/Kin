@@ -9,3 +9,6 @@ src-tauri/target/
 *.log
 .wrangler/
 src-tauri/icons/
+public/icons/icon-192.png
+public/icons/icon-512.png
+public/icons/icon-maskable-512.png
