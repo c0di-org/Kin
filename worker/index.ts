@@ -41,11 +41,13 @@ const MESSAGE_TTL = 7 * 24 * 60 * 60 * 1000;
 const PAIR_TTL = 10 * 60 * 1000;
 const MAX_FILE = 25 * 1024 * 1024;
 
-function b64urlToBytes(value: string): Uint8Array {
+function b64urlToBytes(value: string): Uint8Array<ArrayBuffer> {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
   const padded = normalized + "===".slice((normalized.length + 3) % 4);
   const binary = atob(padded);
-  return Uint8Array.from(binary, c => c.charCodeAt(0));
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
 }
 
 function json(data: unknown, status = 200): Response {

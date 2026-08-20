@@ -58,6 +58,8 @@ Then deploy the PWA + relay together:
 npm run deploy
 ```
 
+Production deploys are **Wrangler-only** (`npm run deploy` / `npx wrangler deploy`). GitHub Actions runs CI (install, build, test) and does not deploy, so it cannot race Cloudflare Git integration or a local Wrangler deploy.
+
 Cloudflare Workers Static Assets serves `dist/` and the same Worker handles `/api/*`, so there is no CORS setup in production.
 
 ## PWA install

@@ -3,21 +3,35 @@ import type { ChatPayload, CipherEnvelope, LocalIdentity, PublicMember } from ".
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+type Bytes = Uint8Array<ArrayBuffer>;
+
+export function asBytes(value: ArrayBuffer | Uint8Array): Bytes {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (value.buffer instanceof ArrayBuffer && value.byteOffset === 0 && value.byteLength === value.buffer.byteLength) {
+    return value as Bytes;
+  }
+  const copy = new Uint8Array(value.byteLength);
+  copy.set(value);
+  return copy;
+}
+
 export function b64(bytes: ArrayBuffer | Uint8Array): string {
-  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const arr = asBytes(bytes);
   let s = "";
   for (const x of arr) s += String.fromCharCode(x);
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-export function unb64(value: string): Uint8Array {
+export function unb64(value: string): Bytes {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
   const raw = atob(padded);
-  return Uint8Array.from(raw, c => c.charCodeAt(0));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
 }
 
 export async function sha256(value: string | Uint8Array | ArrayBuffer): Promise<string> {
-  const bytes = typeof value === "string" ? enc.encode(value) : value;
+  const bytes = typeof value === "string" ? enc.encode(value) : asBytes(value);
   return b64(await crypto.subtle.digest("SHA-256", bytes));
 }
 
@@ -150,7 +164,7 @@ export async function signRequest(identity: LocalIdentity, method: string, path:
   };
 }
 
-export async function encryptFile(file: File): Promise<{ ciphertext: Uint8Array; key: string; iv: string; sha256: string }> {
+export async function encryptFile(file: File): Promise<{ ciphertext: Bytes; key: string; iv: string; sha256: string }> {
   const key = randomKey();
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const aes = await importConversationKey(key, ["encrypt"]);

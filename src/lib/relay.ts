@@ -56,7 +56,7 @@ export async function sendEnvelope(roomId: string, envelope: CipherEnvelope): Pr
   });
 }
 
-export async function uploadEncryptedFile(identity: LocalIdentity, roomId: string, fileId: string, ciphertext: Uint8Array, contentHash: string): Promise<void> {
+export async function uploadEncryptedFile(identity: LocalIdentity, roomId: string, fileId: string, ciphertext: Uint8Array<ArrayBuffer>, contentHash: string): Promise<void> {
   const path = `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}`;
   const auth = await signRequest(identity, "PUT", path, "", contentHash);
   const res = await fetch(`${base}${path}`, { method: "PUT", headers: { ...auth, "Content-Type": "application/octet-stream" }, body: ciphertext });
