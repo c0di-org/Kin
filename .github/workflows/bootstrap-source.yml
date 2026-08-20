@@ -31,3 +31,4 @@ jobs:
           git add -u -- .upload
           git commit -m "Build Kin family messenger PWA and encrypted relay"
           git push origin HEAD:main
+# trigger bootstrap
