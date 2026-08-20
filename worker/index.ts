@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import webpush from "web-push";
+import { sendPushNotification, type PushSubscriptionJSON } from "./webpush";
 
 type Member = {
   deviceId: string;
@@ -178,11 +178,33 @@ export class ConversationRoom extends DurableObject<Env> {
     const key=`msg:${String(envelope.createdAt).padStart(16,"0")}:${envelope.id}`; if(await this.ctx.storage.get(key))return false; await this.ctx.storage.put(key,envelope);
     const current=await this.ctx.storage.getAlarm(), next=Math.min(envelope.expiresAt,Date.now()+60*60_000); if(!current||next<current)await this.ctx.storage.setAlarm(next); return true;
   }
-  private async notifyOthers(senderDeviceId:string,conversationId:string):Promise<void>{
-    if(!this.env.VAPID_PUBLIC_KEY||!this.env.VAPID_PRIVATE_KEY)return;
-    webpush.setVapidDetails(this.env.VAPID_SUBJECT??"mailto:kin@example.invalid",this.env.VAPID_PUBLIC_KEY,this.env.VAPID_PRIVATE_KEY);
-    const subs=await this.ctx.storage.list<webpush.PushSubscription>({prefix:"push:"});
-    await Promise.allSettled([...subs.entries()].map(async([key,sub])=>{if(key===`push:${senderDeviceId}`)return;try{await webpush.sendNotification(sub,JSON.stringify({title:"Kin",body:"New message",conversationId}),{TTL:60,urgency:"high"})}catch(err){const s=(err as{statusCode?:number}).statusCode;if(s===404||s===410)await this.ctx.storage.delete(key)}}));
+  private async notifyOthers(senderDeviceId: string, conversationId: string): Promise<void> {
+    if (!this.env.VAPID_PUBLIC_KEY || !this.env.VAPID_PRIVATE_KEY) return;
+    const [subs, sender, meta] = await Promise.all([
+      this.ctx.storage.list<PushSubscriptionJSON>({ prefix: "push:" }),
+      this.member(senderDeviceId),
+      this.meta()
+    ]);
+    const payload = JSON.stringify({
+      title: meta?.kind === "group" ? meta.title : (sender?.displayName ?? "Kin"),
+      body: meta?.kind === "group" ? `${sender?.displayName ?? "Someone"} sent a message` : "New message",
+      conversationId
+    });
+    const vapid = {
+      publicKey: this.env.VAPID_PUBLIC_KEY,
+      privateKey: this.env.VAPID_PRIVATE_KEY,
+      subject: this.env.VAPID_SUBJECT ?? "mailto:kin@example.invalid"
+    };
+    await Promise.allSettled([...subs.entries()].map(async ([key, sub]) => {
+      if (key === `push:${senderDeviceId}`) return;
+      try {
+        const res = await sendPushNotification(sub, payload, vapid, { ttl: 7 * 24 * 60 * 60, urgency: "high" });
+        if (res.status === 404 || res.status === 410) await this.ctx.storage.delete(key);
+        else if (!res.ok) console.error(JSON.stringify({ kind: "push-failed", status: res.status, endpoint: new URL(sub.endpoint).origin }));
+      } catch (err) {
+        console.error(JSON.stringify({ kind: "push-error", error: String(err) }));
+      }
+    }));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -203,7 +225,7 @@ export class ConversationRoom extends DurableObject<Env> {
     if(tail==="/messages"&&request.method==="POST"){
       const envelope=await request.json() as Envelope;if(!(await this.verifyEnvelope(envelope)))return error("Invalid envelope",401);const fresh=await this.storeEnvelope(envelope);if(fresh){this.broadcast(envelope,envelope.senderDeviceId);this.ctx.waitUntil(this.notifyOthers(envelope.senderDeviceId,meta.id))}return json({ok:true},202);
     }
-    if(tail==="/push"&&request.method==="POST"){const member=await this.verifySignedRequest(request);if(!member)return error("Unauthorized",401);const sub=await request.json() as webpush.PushSubscription;await this.ctx.storage.put(`push:${member.deviceId}`,sub);return json({ok:true})}
+    if(tail==="/push"&&request.method==="POST"){const member=await this.verifySignedRequest(request);if(!member)return error("Unauthorized",401);const sub=await request.json() as PushSubscriptionJSON;if(!sub?.endpoint||!sub.keys?.p256dh||!sub.keys?.auth)return error("Invalid subscription");await this.ctx.storage.put(`push:${member.deviceId}`,sub);return json({ok:true})}
     const fileMatch=tail.match(/^\/files\/([A-Za-z0-9_-]+)$/); if(fileMatch){
       const member=await this.verifySignedRequest(request);if(!member)return error("Unauthorized",401);const fileId=fileMatch[1],key=`rooms/${roomId}/${fileId}`;
       if(request.method==="PUT"){const length=Number(request.headers.get("Content-Length")??0);if(length&&length>MAX_FILE+64*1024)return error("File too large",413);if(!request.body)return error("Missing file");await this.env.ATTACHMENTS.put(key,request.body,{httpMetadata:{contentType:"application/octet-stream"}});return json({ok:true},201)}

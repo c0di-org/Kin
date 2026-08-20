@@ -10,7 +10,7 @@ A tiny, private family messenger built from `c0di-org/Tauri-vibe-template`: Reac
 - Signed message envelopes so the relay cannot silently impersonate a family member.
 - Cloudflare Durable Objects for realtime rooms, WebSocket hibernation, short-lived message relay, and pairing sessions.
 - R2 for encrypted attachments with a seven-day lifecycle rule.
-- PWA manifest, app icons, offline app shell, install flow, badges, and Web Push plumbing.
+- PWA manifest, app icons, offline app shell, install flow, unread badges, and Web Push (works from the installed app, including iOS Home Screen).
 - Same frontend can still be packaged by Tauri for Android, iOS, macOS, Windows, and Linux later.
 
 ## Architecture
@@ -43,7 +43,7 @@ npx wrangler r2 bucket create kin-attachments
 npx wrangler r2 bucket lifecycle add kin-attachments kin-expire --expire-days 7
 ```
 
-Generate Web Push VAPID keys:
+Generate Web Push VAPID keys (once):
 
 ```bash
 npx web-push generate-vapid-keys
@@ -51,6 +51,8 @@ npx wrangler secret put VAPID_PUBLIC_KEY
 npx wrangler secret put VAPID_PRIVATE_KEY
 npx wrangler secret put VAPID_SUBJECT
 ```
+
+The Worker sends pushes with Web Crypto (`worker/webpush.ts`). Do not use the Node `web-push` library on Cloudflare — it talks over Node `https` and fails silently in Durable Objects.
 
 Then deploy the PWA + relay together:
 
@@ -62,9 +64,18 @@ Production is **https://kin.c0di.com** (Workers custom domain). The `*.workers.d
 
 Cloudflare Workers Static Assets serves `dist/` and the same Worker handles `/api/*`, so there is no CORS setup in production.
 
-## PWA install
+## PWA install and notifications
 
-On Android/Chromium, use the in-app **Install app** action when the browser exposes the install prompt. On iPhone/iPad, open Kin in Safari and use **Share → Add to Home Screen**. Web Push on iOS requires the Home Screen app.
+On Android/Chromium, use the in-app **Install app** action when the browser exposes the install prompt, then **Settings → Notifications**.
+
+On iPhone/iPad, Web Push only works after Kin is a Home Screen app:
+
+1. Open https://kin.c0di.com in Safari.
+2. **Share → Add to Home Screen**.
+3. Open Kin from the icon (not the Safari tab).
+4. **••• → Notifications**.
+
+The app registers the same push subscription on every conversation, so a DM still notifies even if you last had the family chat open. Push TTL matches the 7-day relay window.
 
 ## Native later
 
