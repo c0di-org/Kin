@@ -61,7 +61,8 @@ export default function App() {
     let dead = false;
     ws.current?.close();
     (async () => {
-      setMessages(x => ({ ...x, [active.id]: await listMessages(active.id) }));
+      const cached = await listMessages(active.id);
+      setMessages(x => ({ ...x, [active.id]: cached }));
       try { for (const e of await history(identity, active.id)) await ingest(active, e); } catch {}
       if (active.kind === "group") {
         try {
@@ -164,7 +165,7 @@ export default function App() {
         let members = [pkg.creator, publicMember(id)];
         try { members = await roomMembers(id, pkg.group.id); } catch {}
         const c: Conversation = { id: pkg.group.id, kind: "group", title: pkg.group.title, key, members, createdAt: Date.now() };
-        await putConversation(c); await refresh(); setActiveId(c.id); setPanel("none"); flash(`Paired ${pkg.safetyCode}`); history.replaceState({}, "", "/"); return;
+        await putConversation(c); await refresh(); setActiveId(c.id); setPanel("none"); flash(`Paired ${pkg.safetyCode}`); window.history.replaceState({}, "", "/"); return;
       } catch { await new Promise(r => setTimeout(r, 1000)); }
     }
     flash("Pairing timed out");
@@ -177,7 +178,6 @@ export default function App() {
     const link = `${location.origin}${location.pathname}?pair=${encodeURIComponent(p.code)}`;
     setPair({ code: p.code, token: p.creatorToken, qr: await QRCode.toDataURL(link, { margin: 1, width: 220 }) });
     for (let i=0;i<120;i++) {
-      if (panel === "none") break;
       try {
         const status = await pairStatus(p.code, p.creatorToken);
         if (status.joiner) {
