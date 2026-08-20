@@ -1,0 +1,1 @@
+The PNG app icons are materialized from the committed `.png.b64` sources by `scripts/materialize-icons.mjs` before `npm run dev` and `npm run build`. This keeps the repository publishable through text-only GitHub connectors while producing normal PNG assets for the PWA.
