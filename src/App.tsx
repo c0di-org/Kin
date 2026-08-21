@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { decryptPayload, directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, verifyEnvelope, wrapConversationKey } from "./lib/crypto";
-import { deleteMessage, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage } from "./lib/db";
+import { deleteMessage, getBlob, getIdentity, getMessage, knownMessageIds, listConversations, listMessages, markOwnMessagesRead, putConversation, putIdentity, putMessage, putMessages } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
 import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile, websocketUrl } from "./lib/relay";
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
@@ -198,7 +198,7 @@ export default function App() {
     if (!id || !wanted.current.has(convId) || connecting.current.has(convId) || sockets.current.has(convId)) return;
     connecting.current.add(convId);
     try {
-      try { for (const env of await roomHistory(id, convId)) await ingest(convId, env, false); } catch { /* offline */ }
+      try { await ingestHistory(convId, await roomHistory(id, convId)); } catch { /* offline */ }
       const conv = (await listConversations()).find(c => c.id === convId);
       if (conv?.kind === "group") {
         try {
@@ -225,7 +225,7 @@ export default function App() {
     const me = identityRef.current; if (!me) return;
     let f: { kind?: string; member?: PublicMember; senderDeviceId?: string; active?: boolean; messageId?: string };
     try { f = JSON.parse(raw); } catch { return; }
-    if (f.kind === "message") await ingest(convId, f as unknown as CipherEnvelope, true);
+    if (f.kind === "message") await ingest(convId, f as unknown as CipherEnvelope);
     if (f.kind === "member" && f.member) {
       const member = f.member;
       const conv = (await listConversations()).find(c => c.id === convId);
@@ -245,36 +245,102 @@ export default function App() {
     if (f.kind === "read" && f.senderDeviceId && f.messageId) await applyRead(convId, f.messageId);
   }
 
-  async function ingest(convId: string, env: CipherEnvelope, fresh: boolean): Promise<void> {
+  /** Verify and decrypt one envelope against a roster we already hold. Null if it is not for us. */
+  async function openEnvelope(conv: Conversation, env: CipherEnvelope): Promise<{ message: ChatMessage; sender: PublicMember } | null> {
+    const sender = conv.members.find(m => m.deviceId === env.senderDeviceId);
+    if (!sender || !(await verifyEnvelope(env, sender))) return null;
+    try {
+      const payload = await decryptPayload(env, conv.key);
+      return {
+        sender,
+        message: { id: env.id, conversationId: conv.id, senderDeviceId: env.senderDeviceId, createdAt: env.createdAt, payload, status: "delivered" }
+      };
+    } catch { return null; } // not for us — a key we do not hold
+  }
+
+  /** Fold a decrypted message into what the open conversation is showing. */
+  function showMessages(convId: string, incoming: ChatMessage[]): void {
+    if (!incoming.length) return;
+    setMessages(x => {
+      const byId = new Map((x[convId] ?? []).map(m => [m.id, m]));
+      for (const m of incoming) byId.set(m.id, m);
+      return { ...x, [convId]: [...byId.values()].sort((a, b) => a.createdAt - b.createdAt) };
+    });
+  }
+
+  function previewOf(payload: ChatPayload): string {
+    return payload.type === "text" ? payload.text ?? "" : payload.attachment ? previewLabel(payload.attachment) : "";
+  }
+
+  /**
+   * Replay a history pull in one pass.
+   *
+   * Feeding history through the single-envelope path re-read every conversation, rewrote the
+   * conversation row, and re-read them all again for each message — for a 400-envelope history
+   * that is thousands of database round-trips and hundreds of renders before the app is usable.
+   * Here the roster is read once, the messages land in one transaction, and React hears once.
+   */
+  async function ingestHistory(convId: string, envelopes: CipherEnvelope[]): Promise<void> {
+    const me = identityRef.current; if (!me || !envelopes.length) return;
+    const conv = (await listConversations()).find(c => c.id === convId); if (!conv) return;
+
+    const known = await knownMessageIds(envelopes.map(e => e.id));
+    const fresh = envelopes.filter(e => !known.has(e.id)).sort((a, b) => a.createdAt - b.createdAt);
+    if (!fresh.length) return;
+
+    const opened = (await Promise.all(fresh.map(env => openEnvelope(conv, env)))).flatMap(x => x ? [x] : []);
+    if (!opened.length) return;
+    const messages = opened.map(o => o.message);
+    await putMessages(messages);
+    showMessages(convId, messages);
+
+    // Events (edits, reactions, deletes) never become a conversation's preview line.
+    const visible = opened.filter(o => o.message.payload.type !== "event");
+    const last = visible[visible.length - 1];
+    if (!last) return;
+    const activeAndVisible = convId === activeIdRef.current && !document.hidden;
+    const missed = activeAndVisible ? 0 : visible.filter(o =>
+      o.message.senderDeviceId !== me.deviceId && o.message.createdAt > (conv.lastReadAt ?? 0)).length;
+    const mine = last.message.senderDeviceId === me.deviceId;
+    await putConversation({
+      ...conv,
+      lastMessageAt: Math.max(conv.lastMessageAt ?? 0, last.message.createdAt),
+      unread: (conv.unread ?? 0) + missed,
+      lastPreview: previewOf(last.message.payload),
+      lastPreviewSender: mine ? "You" : firstName(last.sender.displayName)
+    });
+    await refresh();
+  }
+
+  async function ingest(convId: string, env: CipherEnvelope): Promise<void> {
     const me = identityRef.current; if (!me) return;
     if (await getMessage(env.id)) return;
     const conv = (await listConversations()).find(c => c.id === convId); if (!conv) return;
-    const sender = conv.members.find(m => m.deviceId === env.senderDeviceId);
-    if (!sender || !(await verifyEnvelope(env, sender))) return;
-    try {
-      const payload = await decryptPayload(env, conv.key);
-      const m: ChatMessage = { id: env.id, conversationId: convId, senderDeviceId: env.senderDeviceId, createdAt: env.createdAt, payload, status: "delivered" };
-      await putMessage(m);
-      setMessages(x => ({ ...x, [convId]: [...(x[convId] ?? []).filter(y => y.id !== m.id), m].sort((a, b) => a.createdAt - b.createdAt) }));
-      const mine = env.senderDeviceId === me.deviceId;
-      if (payload.type === "event") {
-        if (fresh && !mine && payload.event?.kind === "reaction" && payload.event.value) { emojiBurst(payload.event.value); sounds.react(); }
-        return;
-      }
-      const activeAndVisible = convId === activeIdRef.current && !document.hidden;
-      const unread = !mine && !activeAndVisible && env.createdAt > (conv.lastReadAt ?? 0) ? (conv.unread ?? 0) + 1 : conv.unread ?? 0;
-      await putConversation({
-        ...conv, lastMessageAt: m.createdAt, unread,
-        lastPreview: payload.type === "text" ? payload.text ?? "" : payload.attachment ? previewLabel(payload.attachment) : "",
-        lastPreviewSender: mine ? "You" : firstName(sender.displayName)
-      });
-      await refresh();
-      if (fresh && !mine) {
-        sounds.receive(); buzz(15);
-        if (payload.type === "text" && payload.text && isCelebration(payload.text)) confetti();
-        if (activeAndVisible) sendReadFrame(convId, m.id);
-      }
-    } catch { /* not for us */ }
+    const opened = await openEnvelope(conv, env); if (!opened) return;
+    const { message: m, sender } = opened;
+    const payload = m.payload;
+
+    await putMessage(m);
+    showMessages(convId, [m]);
+
+    const mine = env.senderDeviceId === me.deviceId;
+    if (payload.type === "event") {
+      if (!mine && payload.event?.kind === "reaction" && payload.event.value) { emojiBurst(payload.event.value); sounds.react(); }
+      return;
+    }
+    const activeAndVisible = convId === activeIdRef.current && !document.hidden;
+    const unread = !mine && !activeAndVisible && env.createdAt > (conv.lastReadAt ?? 0) ? (conv.unread ?? 0) + 1 : conv.unread ?? 0;
+    await putConversation({
+      ...conv, lastMessageAt: m.createdAt, unread,
+      lastPreview: previewOf(payload),
+      lastPreviewSender: mine ? "You" : firstName(sender.displayName)
+    });
+    await refresh();
+    if (!mine) {
+      sounds.receive(); buzz(15);
+      if (payload.type === "text" && payload.text && isCelebration(payload.text)) confetti();
+      if (activeAndVisible) sendReadFrame(convId, m.id);
+    }
   }
 
   /**
@@ -295,14 +361,7 @@ export default function App() {
   async function applyRead(convId: string, messageId: string): Promise<void> {
     const me = identityRef.current; if (!me) return;
     const target = await getMessage(messageId); if (!target) return;
-    const msgs = await listMessages(convId);
-    const updated: ChatMessage[] = [];
-    for (const m of msgs) {
-      if (m.senderDeviceId === me.deviceId && m.createdAt <= target.createdAt && m.status !== "read") {
-        const r = { ...m, status: "read" as const };
-        await putMessage(r); updated.push(r);
-      }
-    }
+    const updated = await markOwnMessagesRead(convId, me.deviceId, target.createdAt);
     if (updated.length) setMessages(x => ({ ...x, [convId]: (x[convId] ?? []).map(m => updated.find(u => u.id === m.id) ?? m) }));
   }
 
