@@ -21,6 +21,7 @@ type Envelope = {
   signature: string;
 };
 
+type FileRecord = { fileId: string; key: string; expiresAt: number };
 type RoomMeta = { id: string; kind: "group" | "direct"; title: string; createdAt: number };
 type PairRecord = { code: string; creator: Member; creatorToken: string; group: { id: string; title: string }; joiner?: Member; joinerToken?: string; complete?: boolean };
 type PairPackage = { creator: Member; group: { id: string; title: string; wrappedKey: string; wrapIv: string }; safetyCode: string };
@@ -419,6 +420,12 @@ export class ConversationRoom extends DurableObject<Env> {
       try { await this.env.ATTACHMENTS.delete(key); } catch { /* nothing landed */ }
       return String(err).includes(TOO_LARGE) ? error("File too large", 413) : error("Upload rejected", 400);
     }
+    // R2 has no lifecycle rule behind it and wrangler.jsonc cannot express one, so the room
+    // remembers what it put there and expires it on the same sweep that expires envelopes.
+    // Without this record an attachment simply lives in the bucket forever.
+    const expiresAt = Date.now() + MESSAGE_TTL;
+    await this.ctx.storage.put(`file:${String(expiresAt).padStart(16, "0")}:${fileId}`, { fileId, key, expiresAt });
+    await this.scheduleSweep(expiresAt);
     return json({ ok: true }, 201);
   }
 
@@ -516,6 +523,23 @@ export class ConversationRoom extends DurableObject<Env> {
     for (const [key, expiresAt] of await this.ctx.storage.list<number>({ prefix: "nonce:" })) {
       if (expiresAt <= now) deletes.push(key);
       else next = Math.min(next, expiresAt);
+    }
+
+    const expiredFiles: FileRecord[] = [];
+    const fileRecordKeys: string[] = [];
+    for (const [key, record] of await this.ctx.storage.list<FileRecord>({ prefix: "file:" })) {
+      if (record.expiresAt <= now) { expiredFiles.push(record); fileRecordKeys.push(key); }
+      else next = Math.min(next, record.expiresAt);
+    }
+    if (expiredFiles.length) {
+      try {
+        await this.env.ATTACHMENTS.delete(expiredFiles.map(r => r.key));
+        deletes.push(...fileRecordKeys);
+      } catch (err) {
+        // Hold on to the records so the next sweep retries, rather than forgetting objects
+        // that are still sitting in the bucket.
+        console.error(JSON.stringify({ kind: "attachment-sweep-failed", count: expiredFiles.length, error: String(err) }));
+      }
     }
 
     if (deletes.length) await this.ctx.storage.delete(deletes);
