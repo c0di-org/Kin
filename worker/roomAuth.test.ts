@@ -154,6 +154,19 @@ describe("attachment uploads", () => {
     expect(f.env.ATTACHMENTS.objects.size).toBe(0);
   });
 
+  it("rejects an upload that declares an oversize Content-Length", async () => {
+    await f.seed();
+    const path = url("/files/declared");
+    const headers = await signHeaders(f.alice, "PUT", path, "", await sha256b64("whatever"));
+    const res = await f.room.fetch(new Request(`https://kin.test${path}`, {
+      method: "PUT",
+      headers: { ...headers, "Content-Length": String(40 * 1024 * 1024) },
+      body: streamOf(1), duplex: "half"
+    } as RequestInit));
+    expect(res.status).toBe(413);
+    expect(f.env.ATTACHMENTS.objects.size).toBe(0);
+  });
+
   it("rejects bytes that disagree with the signed digest", async () => {
     await f.seed();
     const path = url("/files/swapped");

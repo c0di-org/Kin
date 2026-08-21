@@ -67,17 +67,24 @@ async function sha256b64(bytes: Uint8Array): Promise<string> {
 async function directRoomId(a: string, b: string): Promise<string> {
   return (await sha256b64(enc.encode(`kin-direct-room:${[a, b].sort().join(":")}`))).slice(0, 32);
 }
-const TOO_LARGE = "kin-file-too-large";
-/** Abort a stream once it exceeds `limit`, because Content-Length is a hint a chunked upload omits. */
-function capped(limit: number): TransformStream<Uint8Array, Uint8Array> {
-  let seen = 0;
-  return new TransformStream({
-    transform(chunk, controller) {
-      seen += chunk.byteLength;
-      if (seen > limit) controller.error(new Error(TOO_LARGE));
-      else controller.enqueue(chunk);
+/** Read a stream into memory, giving up past `limit` rather than trusting a size nobody declared. */
+async function readAtMost(stream: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array | null> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) { await reader.cancel(); return null; }
+      chunks.push(value);
     }
-  });
+  } finally { reader.releaseLock(); }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
+  return out;
 }
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
@@ -408,21 +415,37 @@ export class ConversationRoom extends DurableObject<Env> {
    */
   private async putFile(request: Request, fileId: string, key: string): Promise<Response> {
     const limit = MAX_FILE + 64 * 1024;
-    if (Number(request.headers.get("Content-Length") ?? 0) > limit) return error("File too large", 413);
+    const declared = request.headers.get("Content-Length");
+    if (declared && Number(declared) > limit) return error("File too large", 413);
     const claimedDigest = request.headers.get("X-Kin-Body") ?? "";
     const signed = await this.verifySigned(request, claimedDigest);
     if (!signed) return error("Unauthorized", 401);
     if (!request.body) return error("Missing file");
     const digest = b64urlToBytes(claimedDigest);
     if (digest.byteLength !== 32) return error("Invalid content hash");
+
+    // R2 only accepts a body whose length is known up front, so a declared upload streams
+    // straight through — the runtime holds it to its Content-Length, which we have already
+    // bounded. A chunked upload declares nothing, which is exactly the case the old guard let
+    // past unmeasured, so it is read into memory under the same cap instead.
+    let body: ReadableStream<Uint8Array> | Uint8Array = request.body;
+    if (!declared) {
+      const buffered = await readAtMost(request.body, limit);
+      if (!buffered) return error("File too large", 413);
+      body = buffered;
+    }
     try {
-      await this.env.ATTACHMENTS.put(key, request.body.pipeThrough(capped(limit)), {
+      await this.env.ATTACHMENTS.put(key, body, {
         httpMetadata: { contentType: "application/octet-stream" },
         sha256: toHex(digest)
       });
     } catch (err) {
+      // R2 aborts a checksum mismatch mid-stream; let go of the rest of the body before
+      // replying, or the runtime raises "can't read from request stream after response".
+      try { await request.body.cancel(); } catch { /* already consumed */ }
       try { await this.env.ATTACHMENTS.delete(key); } catch { /* nothing landed */ }
-      return String(err).includes(TOO_LARGE) ? error("File too large", 413) : error("Upload rejected", 400);
+      console.error(JSON.stringify({ kind: "upload-rejected", error: String(err) }));
+      return error("Upload rejected", 400);
     }
     // R2 has no lifecycle rule behind it and wrangler.jsonc cannot express one, so the room
     // remembers what it put there and expires it on the same sweep that expires envelopes.
