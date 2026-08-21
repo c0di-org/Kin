@@ -337,7 +337,12 @@ export class ConversationRoom extends DurableObject<Env> {
     if (!creator) return error("Unauthorized", 401);
 
     const existing = await this.meta();
-    if (existing) return json(existing);
+    if (existing) {
+      // Re-creating a room you are in is a no-op that hands back its metadata. Doing so for a room
+      // you are *not* in must not confirm it exists: direct room ids are derivable by anyone in the
+      // family, so answering would let a member enumerate who has a private chat with whom.
+      return (await this.member(creator.deviceId)) ? json(existing) : error("Not a member of this room", 403);
+    }
 
     // A direct room's id is a hash of exactly the two device ids in it, so recomputing it here
     // binds the room to its participants. Everyone in a family knows everyone's device ids, so

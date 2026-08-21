@@ -130,6 +130,24 @@ describe("room creation", () => {
     expect((await f.room.fetch(await signedRequest(f.alice, "PUT", url("", "not-a-derived-id"), body))).status).toBe(403);
   });
 
+  it("hands an existing room back to a member who re-creates it", async () => {
+    const body = group(f);
+    await f.room.fetch(await signedRequest(f.alice, "PUT", url(), body));
+    const again = await f.room.fetch(await signedRequest(f.bob, "PUT", url(), body));
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ title: "Family" });
+  });
+
+  it("will not confirm an existing room to someone who is not in it", async () => {
+    await f.room.fetch(await signedRequest(f.alice, "PUT", url(), group(f)));
+    // Mallory lists herself to get past the signature check, but she is not on the roster.
+    const res = await f.room.fetch(await signedRequest(f.mallory, "PUT", url(), {
+      kind: "group", title: "Family", members: [f.mallory.member()]
+    }));
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain("Family");
+  });
+
   it("accepts the direct room its two participants derive", async () => {
     const id = await directRoomId(f.alice.deviceId, f.bob.deviceId);
     const body = { kind: "direct", title: "Bob", members: [f.alice.member(), f.bob.member()] };
