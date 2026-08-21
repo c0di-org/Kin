@@ -2,40 +2,49 @@ import { useEffect, useRef, useState } from "react";
 import type { AttachmentPayload, Conversation, LocalIdentity } from "../lib/types";
 import { cachedUrl, fmtDuration, fmtSize, mediaKind, resolveAttachment, saveToDevice, shareFile } from "../lib/media";
 
-export function useAttachmentUrl(identity: LocalIdentity, conversation: Conversation, att: AttachmentPayload): { url: string | null; failed: boolean } {
+type Gone = { failed: boolean; permanent: boolean; onRetry(): void };
+const goneNote = (permanent: boolean): string => permanent ? "Ask them to send it again" : "Tap to try again";
+
+export function useAttachmentUrl(identity: LocalIdentity, conversation: Conversation, att: AttachmentPayload): Gone & { url: string | null } {
   const [url, setUrl] = useState<string | null>(() => cachedUrl(att.fileId));
   const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (url) return;
     let live = true;
+    setFailed(false);
     void resolveAttachment(identity, conversation, att).then(u => {
       if (!live) return;
       if (u) setUrl(u); else setFailed(true);
     });
     return () => { live = false; };
-  }, [att.fileId]);
-  return { url, failed };
+  }, [att.fileId, attempt]);
+  // Attachments sent before the key made it into the envelope can never be opened by anyone but the
+  // sender, so don't offer a retry that is certain to fail.
+  const permanent = !att.key || !att.iv;
+  // Otherwise a download can fail just because the network blinked — let a tap try again.
+  return { url, failed, permanent, onRetry: () => setAttempt(n => n + 1) };
 }
 
-export function ImageContent({ att, url, failed, onOpen }: { att: AttachmentPayload; url: string | null; failed: boolean; onOpen(): void }) {
+export function ImageContent({ att, url, failed, permanent, onOpen, onRetry }: Gone & { att: AttachmentPayload; url: string | null; onOpen(): void }) {
   const ratio = att.width && att.height ? att.width / att.height : 4 / 3;
-  return <button className="img-frame" style={{ aspectRatio: `${ratio}` }} onClick={() => url && onOpen()} aria-label={att.name}>
+  return <button className="img-frame" style={{ aspectRatio: `${ratio}` }} onClick={() => url ? onOpen() : failed && !permanent && onRetry()} aria-label={att.name}>
     {url
       ? <img src={url} alt={att.name} />
       : failed
-        ? <span className="img-gone">🌫️<small>Photo expired</small></span>
+        ? <span className="img-gone">🌫️<small>Couldn’t load — {goneNote(permanent)}</small></span>
         : <>{att.thumb && <img className="img-thumb" src={att.thumb} alt="" />}<span className="img-spinner" /></>}
   </button>;
 }
 
-export function VideoContent({ att, url, failed }: { att: AttachmentPayload; url: string | null; failed: boolean }) {
+export function VideoContent({ att, url, failed, permanent, onRetry }: Gone & { att: AttachmentPayload; url: string | null }) {
   const ratio = att.width && att.height ? att.width / att.height : 16 / 9;
-  if (failed) return <span className="img-frame img-gone" style={{ aspectRatio: `${ratio}` }}>🌫️<small>Video expired</small></span>;
+  if (failed) return <button className="img-frame img-gone" style={{ aspectRatio: `${ratio}` }} onClick={() => !permanent && onRetry()}>🌫️<small>Couldn’t load — {goneNote(permanent)}</small></button>;
   if (!url) return <span className="img-frame" style={{ aspectRatio: `${ratio}` }}><span className="img-spinner" /></span>;
   return <video className="video-frame" src={url} controls playsInline preload="metadata" />;
 }
 
-export function VoiceContent({ att, url, failed }: { att: AttachmentPayload; url: string | null; failed: boolean }) {
+export function VoiceContent({ att, url, failed, permanent, onRetry }: Gone & { att: AttachmentPayload; url: string | null }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -57,7 +66,7 @@ export function VoiceContent({ att, url, failed }: { att: AttachmentPayload; url
     else { void audioRef.current.play(); setPlaying(true); }
   };
 
-  if (failed) return <span className="voice gone">🌫️ Voice note expired</span>;
+  if (failed) return <button className="voice gone" onClick={() => !permanent && onRetry()}>🌫️ Couldn’t load — {goneNote(permanent)}</button>;
   return <span className="voice">
     <button className="voice-btn" onClick={toggle} disabled={!url} aria-label={playing ? "Pause" : "Play"}>{!url ? "…" : playing ? "❚❚" : "▶"}</button>
     <span className="voice-track"><i style={{ width: `${progress * 100}%` }} /></span>
@@ -65,10 +74,10 @@ export function VoiceContent({ att, url, failed }: { att: AttachmentPayload; url
   </span>;
 }
 
-export function FileContent({ att, url, failed, onOpen }: { att: AttachmentPayload; url: string | null; failed: boolean; onOpen(): void }) {
-  return <button className="file" onClick={onOpen} disabled={failed && !url}>
+export function FileContent({ att, url, failed, permanent, onOpen, onRetry }: Gone & { att: AttachmentPayload; url: string | null; onOpen(): void }) {
+  return <button className="file" onClick={() => failed && !url ? !permanent && onRetry() : onOpen()}>
     <b>{failed ? "🌫️" : "📄"}</b>
-    <span><strong>{att.name}</strong><small>{failed ? "Expired" : fmtSize(att.size)}</small></span>
+    <span><strong>{att.name}</strong><small>{failed ? `Couldn’t load — ${goneNote(permanent)}` : fmtSize(att.size)}</small></span>
   </button>;
 }
 

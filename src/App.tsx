@@ -10,10 +10,10 @@ import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
 import { confetti, emojiBurst, isCelebration } from "./lib/effects";
 import Aurora from "./components/Aurora";
 import Doodle from "./components/Doodle";
-import Onboarding from "./components/Onboarding";
+import Onboarding, { ANIMALS } from "./components/Onboarding";
 import { FileContent, ImageContent, Lightbox, useAttachmentUrl, VideoContent, VoiceContent } from "./components/Media";
 
-type Panel = "none" | "pair" | "join" | "members" | "settings" | "attach" | "add" | "doodle";
+type Panel = "none" | "pair" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
@@ -69,6 +69,7 @@ export default function App() {
   const [rec, setRec] = useState<MediaRecorder | null>(null);
   const [recElapsed, setRecElapsed] = useState(0);
   const [shareIntake, setShareIntake] = useState<{ files: File[]; text: string } | null>(null);
+  const [recent, setRecent] = useState<Record<string, ChatMessage[]>>({});
 
   const sockets = useRef(new Map<string, WebSocket>());
   const wanted = useRef(new Set<string>());
@@ -76,6 +77,11 @@ export default function App() {
   const identityRef = useRef<LocalIdentity | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const recCancelled = useRef(false);
+  const pushStatusRef = useRef<PushStatus>("off");
+  const directCache = useRef(new Map<string, { id: string; key: string }>());
+  const probedAt = useRef(new Map<string, number>());
+  const sweeping = useRef(false);
+  const discoverRef = useRef<() => void>(() => {});
   const cameraInput = useRef<HTMLInputElement>(null);
   const mediaInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -84,6 +90,7 @@ export default function App() {
 
   identityRef.current = identity;
   activeIdRef.current = activeId;
+  pushStatusRef.current = pushStatus;
   const active = conversations.find(c => c.id === activeId) ?? null;
   const activeMessages = messages[activeId ?? ""] ?? [];
 
@@ -120,7 +127,7 @@ export default function App() {
       if (data?.type === "kin-push" && data.conversationId && data.conversationId !== activeIdRef.current) {
         void (async () => {
           const current = (await listConversations()).find(c => c.id === data.conversationId);
-          if (!current) return;
+          if (!current) return discoverRef.current();
           await putConversation({ ...current, unread: (current.unread ?? 0) + 1, lastPreview: current.lastPreview || "New message", lastMessageAt: Date.now() });
           await refresh();
         })();
@@ -214,9 +221,14 @@ export default function App() {
     try { f = JSON.parse(raw); } catch { return; }
     if (f.kind === "message") await ingest(convId, f as unknown as CipherEnvelope, true);
     if (f.kind === "member" && f.member) {
+      const member = f.member;
       const conv = (await listConversations()).find(c => c.id === convId);
       if (conv) {
-        await putConversation({ ...conv, members: [...conv.members.filter(m => m.deviceId !== f.member!.deviceId), f.member] });
+        const known = conv.members.some(m => m.deviceId === member.deviceId);
+        const members = known ? conv.members.map(m => m.deviceId === member.deviceId ? member : m) : [...conv.members, member];
+        // a direct chat is titled after the other person, so a rename has to move the title too
+        const peerRenamed = conv.kind === "direct" && member.deviceId !== me.deviceId;
+        await putConversation({ ...conv, members, ...(peerRenamed ? { title: member.displayName } : {}) });
         await refresh();
       }
     }
@@ -288,6 +300,67 @@ export default function App() {
     if (lastIn) sendReadFrame(convId, lastIn.id);
   }
 
+  // ---------- private chats someone else started ----------
+  // A direct room id is derived from both device keys, so we can go looking for the rooms our family
+  // members may have opened with us. The relay only answers for rooms we are already a member of,
+  // which is exactly the ones they created naming us.
+  const PROBE_EVERY = 90_000;
+
+  async function directWith(me: LocalIdentity, peer: PublicMember): Promise<{ id: string; key: string }> {
+    const hit = directCache.current.get(peer.deviceId);
+    if (hit) return hit;
+    const derived = await directConversation(me, peer);
+    directCache.current.set(peer.deviceId, derived);
+    return derived;
+  }
+
+  async function discoverDirectChats(force = false): Promise<void> {
+    const me = identityRef.current;
+    if (!me || !navigator.onLine || sweeping.current) return;
+    if (force) probedAt.current.clear(); // opening the app, or a push we can't place, means look now
+    sweeping.current = true;
+    try {
+      const convs = await listConversations();
+      const known = new Set(convs.map(c => c.id));
+      const peers = new Map<string, PublicMember>();
+      for (const c of convs) for (const m of c.members) if (m.deviceId !== me.deviceId) peers.set(m.deviceId, m);
+      const now = Date.now();
+      for (const peer of peers.values()) {
+        if (now - (probedAt.current.get(peer.deviceId) ?? 0) < PROBE_EVERY) continue;
+        const direct = await directWith(me, peer);
+        if (known.has(direct.id)) continue;
+        probedAt.current.set(peer.deviceId, now);
+        let envelopes: CipherEnvelope[];
+        try { envelopes = await roomHistory(me, direct.id); }
+        catch { continue; } // no such room yet — they haven't started one
+        // The room exists: subscribe for pushes even while it is empty, so their first message nudges us.
+        if (pushStatusRef.current === "on") void registerPushForRooms(me, [direct.id]).catch(() => { /* next sweep */ });
+        if (!envelopes.length) continue;
+        const stamps = envelopes.map(e => e.createdAt);
+        await putConversation({
+          id: direct.id, kind: "direct", title: peer.displayName, key: direct.key,
+          members: [publicMember(me), peer],
+          createdAt: Math.min(...stamps), lastMessageAt: Math.max(...stamps)
+        });
+        // refresh() hands it to the socket effect, which pulls the history and counts the unreads
+        await refresh();
+        sounds.receive(); buzz(15);
+        flash(`${firstName(peer.displayName)} started a private chat 💬`);
+      }
+    } finally { sweeping.current = false; }
+  }
+  discoverRef.current = () => void discoverDirectChats(true);
+
+  useEffect(() => {
+    if (!ready || !identity) return;
+    const sweep = (force: boolean) => { if (document.visibilityState === "visible") void discoverDirectChats(force); };
+    sweep(true);
+    const timer = setInterval(() => sweep(false), 30_000);
+    const onVisible = () => sweep(true);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [ready, identity?.deviceId, conversationIds, online]);
+
   // ---------- open conversation ----------
   useEffect(() => {
     if (!identity || !activeId) return;
@@ -305,6 +378,14 @@ export default function App() {
 
   useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }); }, [activeMessages.length, typing.length, activeId]);
 
+  // the keyboard shrinks the viewport under us — keep the newest message in sight
+  useEffect(() => {
+    const vv = window.visualViewport; if (!vv) return;
+    const onResize = () => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }); };
+    vv.addEventListener("resize", onResize);
+    return () => vv.removeEventListener("resize", onResize);
+  }, []);
+
   // ---------- app badge ----------
   useEffect(() => {
     const total = conversations.reduce((n, c) => n + (c.unread ?? 0), 0);
@@ -313,6 +394,7 @@ export default function App() {
   }, [conversations]);
 
   // ---------- sending ----------
+  /** beforeSend runs after the payload is already sealed — it may upload, but must not mutate `payload`. */
   async function send(conv: Conversation, payload: ChatPayload, beforeSend?: () => Promise<void>): Promise<void> {
     const me = identityRef.current; if (!me) return;
     const env = await signEnvelope(me, await encryptPayload(conv.id, conv.key, me.deviceId, payload));
@@ -359,17 +441,18 @@ export default function App() {
     const fileId = randomId();
     const dims = mime.startsWith("image/") ? await probeImage(file) : null;
     await rememberLocalFile(fileId, file, file.name, mime);
+    // Encrypt before building the payload: send() seals the payload immediately, so the file key has
+    // to be in it already. Filling it in from beforeSend would ship an unopenable attachment.
+    const encrypted = await encryptFile(file);
     const attachment: AttachmentPayload = {
-      fileId, name: file.name, mime, size: file.size, iv: "", key: "", sha256: "",
+      fileId, name: file.name, mime, size: file.size,
+      iv: encrypted.iv, key: encrypted.key, sha256: encrypted.sha256,
       ...(dims ? { width: dims.width, height: dims.height, thumb: dims.thumb } : {}),
       ...(extra?.durationMs ? { durationMs: extra.durationMs } : {})
     };
     sounds.send(); buzz(8);
-    await send(conv, { type: "file", attachment }, async () => {
-      const encrypted = await encryptFile(file);
-      attachment.iv = encrypted.iv; attachment.key = encrypted.key; attachment.sha256 = encrypted.sha256;
-      await uploadEncryptedFile(me, conv.id, fileId, encrypted.ciphertext, encrypted.sha256);
-    });
+    await send(conv, { type: "file", attachment }, () =>
+      uploadEncryptedFile(me, conv.id, fileId, encrypted.ciphertext, encrypted.sha256));
   }
 
   async function retry(m: ChatMessage): Promise<void> {
@@ -425,6 +508,26 @@ export default function App() {
       setRec(recorder);
       buzz(20);
     } catch { flash("Microphone not available"); }
+  }
+
+  // ---------- profile ----------
+  async function saveProfile(name: string, avatar: string): Promise<void> {
+    const me = identityRef.current; if (!me) return;
+    const next: LocalIdentity = { ...me, displayName: name.trim().slice(0, 32) || me.displayName, avatarSeed: `e:${avatar}` };
+    await putIdentity(next);
+    setIdentity(next);
+    const mine = publicMember(next);
+    const convs = await listConversations();
+    for (const c of convs) {
+      if (c.members.some(m => m.deviceId === next.deviceId)) {
+        await putConversation({ ...c, members: c.members.map(m => m.deviceId === next.deviceId ? mine : m) });
+      }
+    }
+    await refresh();
+    setPanel("settings");
+    // Every room re-broadcasts the updated member card to whoever is connected.
+    const pushed = await Promise.allSettled(convs.map(c => addRoomMember(next, c.id, mine)));
+    flash(pushed.some(r => r.status === "rejected") ? "Saved — your family will see it next time you’re online" : "Looking good! ✨");
   }
 
   // ---------- family lifecycle ----------
@@ -494,10 +597,13 @@ export default function App() {
 
   async function privateChat(peer: PublicMember): Promise<void> {
     if (!identity) return;
-    const d = await directConversation(identity, peer);
+    const d = await directWith(identity, peer);
+    const existing = (await listConversations()).find(c => c.id === d.id);
+    setPanel("none");
+    if (existing) return setActiveId(existing.id); // don't clobber the history we already have
     const c: Conversation = { id: d.id, kind: "direct", title: peer.displayName, key: d.key, members: [publicMember(identity), peer], createdAt: Date.now() };
     try { await createRoom(c.id, "direct", c.title, c.members); } catch { /* offline */ }
-    await putConversation(c); await refresh(); setActiveId(c.id); setPanel("none");
+    await putConversation(c); await refresh(); setActiveId(c.id);
   }
 
   async function shareInvite(): Promise<void> {
@@ -550,6 +656,21 @@ export default function App() {
     }
     return { visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions };
   }, [activeMessages]);
+  // With one or two chats a list is mostly empty space — show a proper card for each instead.
+  const showCards = sorted.length > 0 && sorted.length <= 3;
+  // Reload on every conversation refresh rather than off a digest: a chat can gain messages without
+  // its summary changing (history arriving for a chat we just discovered, for one).
+  useEffect(() => {
+    if (!showCards) return;
+    let live = true;
+    void (async () => {
+      const rows = await Promise.all(sorted.map(async c =>
+        [c.id, (await listMessages(c.id)).filter(m => m.payload.type !== "event").slice(-3)] as const));
+      if (live) setRecent(Object.fromEntries(rows));
+    })();
+    return () => { live = false; };
+  }, [showCards, sorted]);
+
   const typingNames = typing.map(d => active?.members.find(m => m.deviceId === d)?.displayName).filter(Boolean).map(n => firstName(n!));
   const showIosInstall = isAppleTouchDevice() && !isStandalone();
 
@@ -565,8 +686,11 @@ export default function App() {
         <button className="round" onClick={() => setPanel("settings")} aria-label="Settings"><Avatar member={publicMember(identity)} size={38}/></button>
       </header>
       <p className="greeting">{greeting()} <b>{firstName(identity.displayName)}</b></p>
-      <div className="conversation-list">
-        {sorted.map(c => <button key={c.id} className={`conversation ${c.id === activeId ? "active" : ""}`} onClick={() => setActiveId(c.id)}>
+      <div className={`conversation-list ${showCards ? "as-cards" : ""}`}>
+        {showCards && sorted.map(c => <FamilyCard key={c.id} c={c} self={identity.deviceId} active={c.id === activeId}
+          recent={recent[c.id] ?? []} onOpen={() => setActiveId(c.id)}
+          onInvite={() => { setActiveId(c.id); void startPairing(); }}/>)}
+        {!showCards && sorted.map(c => <button key={c.id} className={`conversation ${c.id === activeId ? "active" : ""}`} onClick={() => setActiveId(c.id)}>
           <ConversationAvatar c={c} self={identity.deviceId}/>
           <span>
             <strong>{c.kind === "group" ? `${c.title} 🏡` : c.title}</strong>
@@ -584,7 +708,9 @@ export default function App() {
     <main className={`chat ${active ? "open" : ""}`}>
       {active ? <>
         <header className="chat-head">
-          <button className="back" onClick={() => setActiveId(null)} aria-label="Back">‹</button>
+          <button className="back" onClick={() => setActiveId(null)} aria-label="Back">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 4.5 8 12l7.5 7.5"/></svg>
+          </button>
           <button className="chat-person" onClick={() => active.kind === "group" && setPanel("members")}>
             <ConversationAvatar c={active} self={identity.deviceId} small/>
             <span>
@@ -696,8 +822,13 @@ export default function App() {
           <Avatar member={m}/><span><strong>{m.displayName}{m.deviceId === identity.deviceId ? " · you" : ""}</strong><small>{m.deviceId === identity.deviceId ? "This device" : "Tap for a private chat"}</small></span>
         </button>)}
       </>}
+      {panel === "profile" && <ProfileEditor identity={identity} onCancel={() => setPanel("settings")} onSave={(n, a) => void saveProfile(n, a)}/>}
       {panel === "settings" && <>
-        <div className="profile"><Avatar member={publicMember(identity)} size={64}/><span><strong>{identity.displayName}</strong><small>That’s you!</small></span></div>
+        <button className="profile" onClick={() => setPanel("profile")}>
+          <Avatar member={publicMember(identity)} size={64}/>
+          <span><strong>{identity.displayName}</strong><small>That’s you — tap to change your name or animal</small></span>
+          <b className="profile-edit">✏️</b>
+        </button>
         <button className="setting" onClick={() => { const on = !soundPref; setSoundsOn(on); setSoundPref(on); if (on) sounds.react(); }}><span>🔊</span>Sounds<b>{soundPref ? "On" : "Off"}</b></button>
         {installPrompt && <button className="setting" onClick={() => void installPrompt.prompt()}><span>📲</span>Install Kin on this device</button>}
         {showIosInstall && <div className="hint"><strong>📲 Install Kin</strong><small>Tap Share, then Add to Home Screen. Open the icon to get notifications.</small></div>}
@@ -708,6 +839,83 @@ export default function App() {
     </section></div>}
     {toast && <div className="toast">{toast}</div>}
   </div>;
+}
+
+function FamilyRing({ c, self }: { c: Conversation; self: string }) {
+  const others = c.members.filter(m => m.deviceId !== self);
+  const shown = (others.length ? others : c.members).slice(0, 6);
+  // One face has nothing to ring around — sit it in the middle and tuck the badge into the corner.
+  const solo = shown.length < 2;
+  const radius = solo ? 0 : shown.length === 2 ? 34 : 38;
+  const size = solo ? 66 : shown.length < 4 ? 42 : 34;
+  // a pair reads better side by side than stacked
+  const start = shown.length === 2 ? Math.PI : -Math.PI / 2;
+  return <span className={`ring ${solo ? "solo" : ""}`} aria-hidden="true">
+    <b className="ring-core">{c.kind === "group" ? "🏡" : "💌"}</b>
+    {shown.map((m, i) => {
+      const angle = (i / shown.length) * Math.PI * 2 + start;
+      return <i key={m.deviceId} style={{
+        margin: -size / 2,
+        transform: `translate(${Math.cos(angle) * radius}px, ${Math.sin(angle) * radius}px)`
+      }}>
+        <Avatar member={m} size={size}/>
+      </i>;
+    })}
+  </span>;
+}
+
+function FamilyCard({ c, self, active, recent, onOpen, onInvite }: {
+  c: Conversation; self: string; active: boolean; recent: ChatMessage[]; onOpen(): void; onInvite(): void;
+}) {
+  const others = c.members.filter(m => m.deviceId !== self);
+  const alone = c.kind === "group" && others.length === 0;
+  const unread = c.unread ?? 0;
+  const nameOf = (deviceId: string): string =>
+    deviceId === self ? "You" : firstName(c.members.find(m => m.deviceId === deviceId)?.displayName ?? "Someone");
+  return <div className={`family-card ${active ? "active" : ""} ${unread > 0 ? "buzzing" : ""}`}>
+    <button className="family-open" onClick={onOpen}>
+      <FamilyRing c={c} self={self}/>
+      <span className="family-head">
+        <strong>{c.kind === "group" ? `${c.title} 🏡` : c.title}</strong>
+        <small>{alone ? "Just you so far" : c.kind === "group"
+          ? `${c.members.length} of you · ${others.map(m => firstName(m.displayName)).join(", ")}`
+          : "Private chat"}</small>
+      </span>
+      {unread > 0 && <i className="unread">{unread > 9 ? "9+" : unread}</i>}
+    </button>
+    {recent.length > 0 && <button className="family-recent" onClick={onOpen}>
+      {recent.map(m => <span key={m.id} className="family-line">
+        <b>{nameOf(m.senderDeviceId)}</b>
+        <em>{m.payload.type === "file" && m.payload.attachment ? previewLabel(m.payload.attachment) : m.payload.text}</em>
+        <time>{time(m.createdAt)}</time>
+      </span>)}
+    </button>}
+    {alone
+      ? <button className="family-invite" onClick={onInvite}>💌 Invite your family</button>
+      : recent.length === 0 && <span className="family-empty">Nothing yet — say hi 👋</span>}
+  </div>;
+}
+
+function ProfileEditor({ identity, onSave, onCancel }: { identity: LocalIdentity; onSave(name: string, avatar: string): void; onCancel(): void }) {
+  const [name, setName] = useState(identity.displayName);
+  const [avatar, setAvatar] = useState(() => seedEmoji(identity.avatarSeed) ?? ANIMALS[0]);
+  const changed = name.trim() !== identity.displayName || `e:${avatar}` !== identity.avatarSeed;
+  return <>
+    <h2>Your look</h2>
+    <div className="profile-preview"><span className="brand-blob">{avatar}</span></div>
+    <label className="onboard-label">Pick your animal</label>
+    <div className="animal-grid">
+      {ANIMALS.map(a => <button key={a} className={`animal ${avatar === a ? "picked" : ""}`} onClick={() => setAvatar(a)} aria-label={a}>{a}</button>)}
+    </div>
+    <label className="onboard-label">Your name</label>
+    <input className="name-input" placeholder="What’s your name?" maxLength={24} value={name}
+      onChange={e => setName(e.target.value)}
+      onKeyDown={e => { if (e.key === "Enter" && name.trim()) onSave(name, avatar); }}/>
+    <div className="profile-actions">
+      <button className="chip-btn" onClick={onCancel}>Cancel</button>
+      <button className="primary" disabled={!name.trim() || !changed} onClick={() => onSave(name, avatar)}>Save ✨</button>
+    </div>
+  </>;
 }
 
 function ConversationAvatar({ c, self, small = false }: { c: Conversation; self: string; small?: boolean }) {
@@ -762,10 +970,10 @@ function Bubble({ m, prev, me, identity, c, reactions, reacting, onReactBar, onR
 }
 
 function MediaBody({ att, identity, c, onOpenMedia }: { att: AttachmentPayload; identity: LocalIdentity; c: Conversation; onOpenMedia(att: AttachmentPayload, url: string): void }) {
-  const { url, failed } = useAttachmentUrl(identity, c, att);
+  const gone = useAttachmentUrl(identity, c, att);
   const kind = mediaKind(att);
-  if (kind === "image") return <ImageContent att={att} url={url} failed={failed} onOpen={() => url && onOpenMedia(att, url)}/>;
-  if (kind === "video") return <VideoContent att={att} url={url} failed={failed}/>;
-  if (kind === "audio") return <VoiceContent att={att} url={url} failed={failed}/>;
-  return <FileContent att={att} url={url} failed={failed} onOpen={() => void saveToDevice(att.fileId, att.name)}/>;
+  if (kind === "image") return <ImageContent {...gone} att={att} onOpen={() => gone.url && onOpenMedia(att, gone.url)}/>;
+  if (kind === "video") return <VideoContent {...gone} att={att}/>;
+  if (kind === "audio") return <VoiceContent {...gone} att={att}/>;
+  return <FileContent {...gone} att={att} onOpen={() => void saveToDevice(att.fileId, att.name)}/>;
 }
