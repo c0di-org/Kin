@@ -1,53 +1,30 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
-import { decryptPayload, directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, verifyEnvelope, wrapConversationKey } from "./lib/crypto";
-import { deleteMessage, getBlob, getIdentity, getMessage, knownMessageIds, listConversations, listMessages, markOwnMessagesRead, putConversation, putIdentity, putMessage, putMessages } from "./lib/db";
+import { directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, wrapConversationKey } from "./lib/crypto";
+import { deleteMessage, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
-import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile, websocketUrl } from "./lib/relay";
+import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
-import { applyRoster } from "./lib/roster";
+import { firstName, mergeMessages, previewOf } from "./lib/ingest";
+import { dayLabel, greeting, seedEmoji, time } from "./lib/format";
+import { useConversationSync } from "./hooks/useConversationSync";
 import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
 import { confetti, emojiBurst, isCelebration } from "./lib/effects";
 import Aurora from "./components/Aurora";
 import Doodle from "./components/Doodle";
-import Onboarding, { ANIMALS } from "./components/Onboarding";
-import { FileContent, ImageContent, Lightbox, useAttachmentUrl, VideoContent, VoiceContent } from "./components/Media";
+import Onboarding from "./components/Onboarding";
+import { Lightbox } from "./components/Media";
+import { Avatar, ConversationAvatar, Mark } from "./components/Avatar";
+import { FamilyCard } from "./components/FamilyCard";
+import { ProfileEditor } from "./components/ProfileEditor";
+import { Bubble } from "./components/Bubble";
 
 type Panel = "none" | "pair" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
 
-const initials = (s: string) => s.trim().split(/\s+/).slice(0, 2).map(x => x[0]?.toUpperCase()).join("") || "•";
-const hue = (s: string) => [...s].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 0) % 360;
-const seedEmoji = (seed: string) => seed.startsWith("e:") ? seed.slice(2) : null;
-const firstName = (s: string) => s.trim().split(/\s+/)[0] ?? s;
-const time = (n: number) => new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(n);
-const dayLabel = (n: number): string => {
-  const d = new Date(n); const today = new Date();
-  const y = new Date(); y.setDate(today.getDate() - 1);
-  if (d.toDateString() === today.toDateString()) return "Today";
-  if (d.toDateString() === y.toDateString()) return "Yesterday";
-  return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "short", day: "numeric" }).format(n);
-};
-const emojiOnly = (t: string): boolean => {
-  const chars = Array.from(t.replace(/[‍️\s]/gu, ""));
-  return chars.length > 0 && chars.length <= 6 && chars.every(c => /[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}]/u.test(c));
-};
-const greeting = (): string => {
-  const h = new Date().getHours();
-  return h < 5 ? "Up late? 🌙" : h < 12 ? "Good morning ☀️" : h < 18 ? "Good afternoon 🌤️" : "Good evening 🌙";
-};
-
-function Avatar({ member, size = 44 }: { member: PublicMember; size?: number }) {
-  const emoji = seedEmoji(member.avatarSeed);
-  return <span className="avatar" style={{ width: size, height: size, fontSize: emoji ? size * 0.56 : size * 0.36, background: `hsl(${hue(member.avatarSeed)} 65% var(--avatar-l))` }}>
-    {emoji ?? initials(member.displayName)}
-  </span>;
-}
-
-function Mark() { return <span className="mark"><i/><i/><i/></span>; }
 
 export default function App() {
   const [identity, setIdentity] = useState<LocalIdentity | null>(null);
@@ -72,11 +49,6 @@ export default function App() {
   const [shareIntake, setShareIntake] = useState<{ files: File[]; text: string } | null>(null);
   const [recent, setRecent] = useState<Record<string, ChatMessage[]>>({});
 
-  const sockets = useRef(new Map<string, WebSocket>());
-  const wanted = useRef(new Set<string>());
-  const connecting = useRef(new Set<string>());
-  const retries = useRef(new Map<string, number>());
-  const retryTimers = useRef(new Map<string, number>());
   const identityRef = useRef<LocalIdentity | null>(identity);
   const activeIdRef = useRef<string | null>(activeId);
   const recCancelled = useRef(false);
@@ -186,211 +158,42 @@ export default function App() {
     } catch { /* nothing shared */ }
   }
 
-  // ---------- realtime: one socket per conversation ----------
   const conversationIds = conversations.map(c => c.id).sort().join(",");
-  useEffect(() => {
-    if (!identity) return;
-    wanted.current = new Set(conversations.map(c => c.id));
-    for (const id of wanted.current) if (!sockets.current.has(id)) void connect(id);
-  }, [identity?.deviceId, conversationIds, online]);
 
-  useEffect(() => () => {
-    wanted.current.clear();
-    retryTimers.current.forEach(clearTimeout);
-    retryTimers.current.clear();
-    sockets.current.forEach(s => s.close());
-    sockets.current.clear();
-  }, []);
-
-  /**
-   * A flat retry means every room in the family reconnects in lockstep after a blip, and keeps
-   * hammering at the same interval if the relay is actually down. Back off, and spread the
-   * attempts out so we are not a synchronised thundering herd of one device.
-   */
-  function scheduleReconnect(convId: string): void {
-    if (!wanted.current.has(convId)) return;
-    const attempt = retries.current.get(convId) ?? 0;
-    retries.current.set(convId, attempt + 1);
-    const ceiling = Math.min(1000 * 2 ** Math.min(attempt, 6), 60_000);
-    const delay = ceiling / 2 + Math.random() * (ceiling / 2);
-    clearTimeout(retryTimers.current.get(convId));
-    retryTimers.current.set(convId, setTimeout(() => {
-      retryTimers.current.delete(convId);
-      void connect(convId);
-    }, delay) as unknown as number);
-  }
-
-  async function connect(convId: string): Promise<void> {
-    const id = identityRef.current;
-    if (!id || !wanted.current.has(convId) || connecting.current.has(convId) || sockets.current.has(convId)) return;
-    connecting.current.add(convId);
-    try {
-      try { await ingestHistory(convId, await roomHistory(id, convId)); } catch { /* offline */ }
-      const conv = (await listConversations()).find(c => c.id === convId);
-      if (conv?.kind === "group") {
-        try {
-          const { conversation, refused } = applyRoster(conv, await roomMembers(id, convId));
-          refused.forEach(warnKeyChange);
-          await putConversation(conversation);
-          await refresh();
-        } catch { /* offline */ }
-      }
-      const socket = new WebSocket(await websocketUrl(id, convId));
-      socket.onopen = () => { retries.current.delete(convId); };
-      socket.onmessage = ev => { void handleFrame(convId, String(ev.data)); };
-      socket.onclose = () => {
-        sockets.current.delete(convId);
-        scheduleReconnect(convId);
-      };
-      sockets.current.set(convId, socket);
-      if (!wanted.current.has(convId)) socket.close();
-    } catch {
-      scheduleReconnect(convId);
-    } finally { connecting.current.delete(convId); }
-  }
-
-  async function handleFrame(convId: string, raw: string): Promise<void> {
-    const me = identityRef.current; if (!me) return;
-    let f: { kind?: string; member?: PublicMember; senderDeviceId?: string; active?: boolean; messageId?: string };
-    try { f = JSON.parse(raw); } catch { return; }
-    if (f.kind === "message") await ingest(convId, f as unknown as CipherEnvelope);
-    if (f.kind === "member" && f.member) {
-      const member = f.member;
-      const conv = (await listConversations()).find(c => c.id === convId);
-      if (conv) {
-        const { conversation, refused } = applyRoster(conv, [member]);
-        if (refused.length) warnKeyChange(refused[0]);
-        // a direct chat is titled after the other person, so a rename has to move the title too
-        const peerRenamed = conv.kind === "direct" && member.deviceId !== me.deviceId && !refused.length;
-        await putConversation({ ...conversation, ...(peerRenamed ? { title: member.displayName } : {}) });
-        await refresh();
+  // ---------- realtime ----------
+  // The sync layer owns sockets, history replay and decryption; everything it hands back is
+  // already verified. What it deliberately does not do is make noise — the reactions below are
+  // the app's, which is what lets the message handling be tested without a speaker attached.
+  const sync = useConversationSync({
+    identity, conversations, activeId, online,
+    events: {
+      onMessages: (convId, incoming) => setMessages(x => ({ ...x, [convId]: mergeMessages(x[convId] ?? [], incoming) })),
+      onConversationsChanged: () => { void refresh(); },
+      onTyping: (convId, senderDeviceId, active) => {
+        if (convId !== activeIdRef.current) return;
+        setTyping(t => active ? [...new Set([...t, senderDeviceId])] : t.filter(x => x !== senderDeviceId));
+      },
+      onKeyChange: warnKeyChange,
+      onIncoming: (convId, { message }) => {
+        const payload = message.payload;
+        if (payload.type === "event") {
+          if (payload.event?.kind === "reaction" && payload.event.value) { emojiBurst(payload.event.value); sounds.react(); }
+          return;
+        }
+        sounds.receive(); buzz(15);
+        if (payload.type === "text" && payload.text && isCelebration(payload.text)) confetti();
+        if (convId === activeIdRef.current && !document.hidden) sync.sendRead(convId, message.id);
       }
     }
-    if (f.kind === "typing" && f.senderDeviceId && f.senderDeviceId !== me.deviceId && convId === activeIdRef.current) {
-      const sender = f.senderDeviceId;
-      setTyping(t => f.active ? [...new Set([...t, sender])] : t.filter(x => x !== sender));
-    }
-    if (f.kind === "read" && f.senderDeviceId && f.messageId) await applyRead(convId, f.messageId);
-  }
-
-  /** Verify and decrypt one envelope against a roster we already hold. Null if it is not for us. */
-  async function openEnvelope(conv: Conversation, env: CipherEnvelope): Promise<{ message: ChatMessage; sender: PublicMember } | null> {
-    const sender = conv.members.find(m => m.deviceId === env.senderDeviceId);
-    if (!sender || !(await verifyEnvelope(env, sender))) return null;
-    try {
-      const payload = await decryptPayload(env, conv.key);
-      return {
-        sender,
-        message: { id: env.id, conversationId: conv.id, senderDeviceId: env.senderDeviceId, createdAt: env.createdAt, payload, status: "delivered" }
-      };
-    } catch { return null; } // not for us — a key we do not hold
-  }
-
-  /** Fold a decrypted message into what the open conversation is showing. */
-  function showMessages(convId: string, incoming: ChatMessage[]): void {
-    if (!incoming.length) return;
-    setMessages(x => {
-      const byId = new Map((x[convId] ?? []).map(m => [m.id, m]));
-      for (const m of incoming) byId.set(m.id, m);
-      return { ...x, [convId]: [...byId.values()].sort((a, b) => a.createdAt - b.createdAt) };
-    });
-  }
-
-  function previewOf(payload: ChatPayload): string {
-    return payload.type === "text" ? payload.text ?? "" : payload.attachment ? previewLabel(payload.attachment) : "";
-  }
-
-  /**
-   * Replay a history pull in one pass.
-   *
-   * Feeding history through the single-envelope path re-read every conversation, rewrote the
-   * conversation row, and re-read them all again for each message — for a 400-envelope history
-   * that is thousands of database round-trips and hundreds of renders before the app is usable.
-   * Here the roster is read once, the messages land in one transaction, and React hears once.
-   */
-  async function ingestHistory(convId: string, envelopes: CipherEnvelope[]): Promise<void> {
-    const me = identityRef.current; if (!me || !envelopes.length) return;
-    const conv = (await listConversations()).find(c => c.id === convId); if (!conv) return;
-
-    const known = await knownMessageIds(envelopes.map(e => e.id));
-    const fresh = envelopes.filter(e => !known.has(e.id)).sort((a, b) => a.createdAt - b.createdAt);
-    if (!fresh.length) return;
-
-    const opened = (await Promise.all(fresh.map(env => openEnvelope(conv, env)))).flatMap(x => x ? [x] : []);
-    if (!opened.length) return;
-    const messages = opened.map(o => o.message);
-    await putMessages(messages);
-    showMessages(convId, messages);
-
-    // Events (edits, reactions, deletes) never become a conversation's preview line.
-    const visible = opened.filter(o => o.message.payload.type !== "event");
-    const last = visible[visible.length - 1];
-    if (!last) return;
-    const activeAndVisible = convId === activeIdRef.current && !document.hidden;
-    const missed = activeAndVisible ? 0 : visible.filter(o =>
-      o.message.senderDeviceId !== me.deviceId && o.message.createdAt > (conv.lastReadAt ?? 0)).length;
-    const mine = last.message.senderDeviceId === me.deviceId;
-    await putConversation({
-      ...conv,
-      lastMessageAt: Math.max(conv.lastMessageAt ?? 0, last.message.createdAt),
-      unread: (conv.unread ?? 0) + missed,
-      lastPreview: previewOf(last.message.payload),
-      lastPreviewSender: mine ? "You" : firstName(last.sender.displayName)
-    });
-    await refresh();
-  }
-
-  async function ingest(convId: string, env: CipherEnvelope): Promise<void> {
-    const me = identityRef.current; if (!me) return;
-    if (await getMessage(env.id)) return;
-    const conv = (await listConversations()).find(c => c.id === convId); if (!conv) return;
-    const opened = await openEnvelope(conv, env); if (!opened) return;
-    const { message: m, sender } = opened;
-    const payload = m.payload;
-
-    await putMessage(m);
-    showMessages(convId, [m]);
-
-    const mine = env.senderDeviceId === me.deviceId;
-    if (payload.type === "event") {
-      if (!mine && payload.event?.kind === "reaction" && payload.event.value) { emojiBurst(payload.event.value); sounds.react(); }
-      return;
-    }
-    const activeAndVisible = convId === activeIdRef.current && !document.hidden;
-    const unread = !mine && !activeAndVisible && env.createdAt > (conv.lastReadAt ?? 0) ? (conv.unread ?? 0) + 1 : conv.unread ?? 0;
-    await putConversation({
-      ...conv, lastMessageAt: m.createdAt, unread,
-      lastPreview: previewOf(payload),
-      lastPreviewSender: mine ? "You" : firstName(sender.displayName)
-    });
-    await refresh();
-    if (!mine) {
-      sounds.receive(); buzz(15);
-      if (payload.type === "text" && payload.text && isCelebration(payload.text)) confetti();
-      if (activeAndVisible) sendReadFrame(convId, m.id);
-    }
-  }
-
+  });
   /**
    * Somebody's device keys changed under us. We keep the keys we paired with, so anything signed
-   * with the new one now fails verifyEnvelope and never renders — but that is silent, and a real
+   * with the new one now fails verification and never renders — but that is silent, and a real
    * key change is indistinguishable from an impersonation attempt without a human looking. Say so.
    */
   function warnKeyChange(member: PublicMember): void {
     flash(`⚠️ ${firstName(member.displayName)}'s security keys changed — check with them in person`);
     buzz(40);
-  }
-
-  function sendReadFrame(convId: string, messageId: string): void {
-    const s = sockets.current.get(convId);
-    if (s?.readyState === 1) s.send(JSON.stringify({ kind: "read", messageId }));
-  }
-
-  async function applyRead(convId: string, messageId: string): Promise<void> {
-    const me = identityRef.current; if (!me) return;
-    const target = await getMessage(messageId); if (!target) return;
-    const updated = await markOwnMessagesRead(convId, me.deviceId, target.createdAt);
-    if (updated.length) setMessages(x => ({ ...x, [convId]: (x[convId] ?? []).map(m => updated.find(u => u.id === m.id) ?? m) }));
   }
 
   async function markRead(convId: string): Promise<void> {
@@ -400,7 +203,7 @@ export default function App() {
     await refresh();
     const msgs = await listMessages(convId);
     const lastIn = [...msgs].reverse().find(m => m.senderDeviceId !== me.deviceId && m.payload.type !== "event");
-    if (lastIn) sendReadFrame(convId, lastIn.id);
+    if (lastIn) sync.sendRead(convId, lastIn.id);
   }
 
   // ---------- private chats someone else started ----------
@@ -527,7 +330,7 @@ export default function App() {
     if (payload.type !== "event") {
       await putConversation({
         ...conv, lastMessageAt: env.createdAt, lastReadAt: env.createdAt,
-        lastPreview: payload.type === "text" ? payload.text ?? "" : payload.attachment ? previewLabel(payload.attachment) : "",
+        lastPreview: previewOf(payload),
         lastPreviewSender: "You"
       });
       await refresh();
@@ -550,8 +353,7 @@ export default function App() {
     const text = draft.trim(); if (!text || !active) return;
     setDraft("");
     if (composer.current) composer.current.style.height = "";
-    const s = sockets.current.get(active.id);
-    if (s?.readyState === 1) s.send(JSON.stringify({ kind: "typing", active: false }));
+    sync.sendTyping(active.id, false);
     sounds.send(); buzz(8);
     if (isCelebration(text)) { confetti(); sounds.tada(); }
     await send(active, { type: "text", text });
@@ -881,7 +683,7 @@ export default function App() {
             <button className="composer-btn" onClick={() => setPanel("attach")} aria-label="Attach">＋</button>
             <button className="composer-btn" onClick={() => setPanel("doodle")} aria-label="Doodle">🖍️</button>
             <textarea ref={composer} rows={1} placeholder={`Message ${active.kind === "direct" ? firstName(active.title) : "everyone"}…`} value={draft}
-              onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(130, e.target.scrollHeight)}px`; const s = sockets.current.get(active.id); if (s?.readyState === 1) s.send(JSON.stringify({ kind: "typing", active: !!e.target.value })); }}
+              onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(130, e.target.scrollHeight)}px`; sync.sendTyping(active.id, !!e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendText(); } }}/>
             {draft.trim()
               ? <button className="send" onClick={() => void sendText()} aria-label="Send">↑</button>
@@ -970,139 +772,3 @@ export default function App() {
   </div>;
 }
 
-function FamilyRing({ c, self }: { c: Conversation; self: string }) {
-  const others = c.members.filter(m => m.deviceId !== self);
-  const shown = (others.length ? others : c.members).slice(0, 6);
-  // One face has nothing to ring around — sit it in the middle and tuck the badge into the corner.
-  const solo = shown.length < 2;
-  const radius = solo ? 0 : shown.length === 2 ? 34 : 38;
-  const size = solo ? 66 : shown.length < 4 ? 42 : 34;
-  // a pair reads better side by side than stacked
-  const start = shown.length === 2 ? Math.PI : -Math.PI / 2;
-  return <span className={`ring ${solo ? "solo" : ""}`} aria-hidden="true">
-    <b className="ring-core">{c.kind === "group" ? "🏡" : "💌"}</b>
-    {shown.map((m, i) => {
-      const angle = (i / shown.length) * Math.PI * 2 + start;
-      return <i key={m.deviceId} style={{
-        margin: -size / 2,
-        transform: `translate(${Math.cos(angle) * radius}px, ${Math.sin(angle) * radius}px)`
-      }}>
-        <Avatar member={m} size={size}/>
-      </i>;
-    })}
-  </span>;
-}
-
-function FamilyCard({ c, self, active, recent, onOpen, onInvite }: {
-  c: Conversation; self: string; active: boolean; recent: ChatMessage[]; onOpen(): void; onInvite(): void;
-}) {
-  const others = c.members.filter(m => m.deviceId !== self);
-  const alone = c.kind === "group" && others.length === 0;
-  const unread = c.unread ?? 0;
-  const nameOf = (deviceId: string): string =>
-    deviceId === self ? "You" : firstName(c.members.find(m => m.deviceId === deviceId)?.displayName ?? "Someone");
-  return <div className={`family-card ${active ? "active" : ""} ${unread > 0 ? "buzzing" : ""}`}>
-    <button className="family-open" onClick={onOpen}>
-      <FamilyRing c={c} self={self}/>
-      <span className="family-head">
-        <strong>{c.kind === "group" ? `${c.title} 🏡` : c.title}</strong>
-        <small>{alone ? "Just you so far" : c.kind === "group"
-          ? `${c.members.length} of you · ${others.map(m => firstName(m.displayName)).join(", ")}`
-          : "Private chat"}</small>
-      </span>
-      {unread > 0 && <i className="unread">{unread > 9 ? "9+" : unread}</i>}
-    </button>
-    {recent.length > 0 && <button className="family-recent" onClick={onOpen}>
-      {recent.map(m => <span key={m.id} className="family-line">
-        <b>{nameOf(m.senderDeviceId)}</b>
-        <em>{m.payload.type === "file" && m.payload.attachment ? previewLabel(m.payload.attachment) : m.payload.text}</em>
-        <time>{time(m.createdAt)}</time>
-      </span>)}
-    </button>}
-    {alone
-      ? <button className="family-invite" onClick={onInvite}>💌 Invite your family</button>
-      : recent.length === 0 && <span className="family-empty">Nothing yet — say hi 👋</span>}
-  </div>;
-}
-
-function ProfileEditor({ identity, onSave, onCancel }: { identity: LocalIdentity; onSave(name: string, avatar: string): void; onCancel(): void }) {
-  const [name, setName] = useState(identity.displayName);
-  const [avatar, setAvatar] = useState(() => seedEmoji(identity.avatarSeed) ?? ANIMALS[0]);
-  const changed = name.trim() !== identity.displayName || `e:${avatar}` !== identity.avatarSeed;
-  return <>
-    <h2>Your look</h2>
-    <div className="profile-preview"><span className="brand-blob">{avatar}</span></div>
-    <label className="onboard-label">Pick your animal</label>
-    <div className="animal-grid">
-      {ANIMALS.map(a => <button key={a} className={`animal ${avatar === a ? "picked" : ""}`} onClick={() => setAvatar(a)} aria-label={a}>{a}</button>)}
-    </div>
-    <label className="onboard-label">Your name</label>
-    <input className="name-input" placeholder="What’s your name?" maxLength={24} value={name}
-      onChange={e => setName(e.target.value)}
-      onKeyDown={e => { if (e.key === "Enter" && name.trim()) onSave(name, avatar); }}/>
-    <div className="profile-actions">
-      <button className="chip-btn" onClick={onCancel}>Cancel</button>
-      <button className="primary" disabled={!name.trim() || !changed} onClick={() => onSave(name, avatar)}>Save ✨</button>
-    </div>
-  </>;
-}
-
-function ConversationAvatar({ c, self, small = false }: { c: Conversation; self: string; small?: boolean }) {
-  const peer = c.members.find(m => m.deviceId !== self) ?? c.members[0];
-  if (c.kind === "direct") return peer ? <Avatar member={peer} size={small ? 38 : 52}/> : <span className="avatar"/>;
-  const people = c.members.filter(m => m.deviceId !== self).slice(0, 3);
-  if (!people.length && c.members[0]) people.push(c.members[0]);
-  return <span className={`stack ${small ? "small" : ""}`}>{people.map(p => <Avatar key={p.deviceId} member={p} size={small ? 27 : 34}/>)}</span>;
-}
-
-function Bubble({ m, prev, me, identity, c, reactions, reacting, onReactBar, onReact, onOpenMedia, onRetry }: {
-  m: ChatMessage; prev?: ChatMessage; me: string; identity: LocalIdentity; c: Conversation;
-  reactions?: Record<string, string[]>; reacting: boolean;
-  onReactBar(): void; onReact(emoji: string, at?: { x: number; y: number }): void;
-  onOpenMedia(att: AttachmentPayload, url: string): void; onRetry(): void;
-}) {
-  const mine = m.senderDeviceId === me;
-  const sender = c.members.find(x => x.deviceId === m.senderDeviceId);
-  const grouped = !!prev && prev.senderDeviceId === m.senderDeviceId && m.createdAt - prev.createdAt < 5 * 60_000;
-  const showName = c.kind === "group" && !mine && !grouped;
-  const press = useRef<number | null>(null);
-  const chips = Object.entries(reactions ?? {}).filter(([, who]) => who.length > 0);
-  const big = m.payload.type === "text" && !!m.payload.text && emojiOnly(m.payload.text);
-
-  const startPress = (e: React.PointerEvent): void => {
-    if (e.button === 2) return;
-    press.current = window.setTimeout(() => { press.current = null; onReactBar(); buzz(10); }, 420);
-  };
-  const endPress = (): void => { if (press.current) { clearTimeout(press.current); press.current = null; } };
-
-  return <div className={`row ${mine ? "mine" : "theirs"} ${grouped ? "grouped" : ""}`}>
-    {c.kind === "group" && !mine && <span className="row-avatar">{!grouped && sender && <Avatar member={sender} size={30}/>}</span>}
-    <div className="bubble-wrap" onClick={e => e.stopPropagation()}>
-      {reacting && <div className="react-bar">
-        {REACTIONS.map(r => <button key={r} onClick={e => onReact(r, { x: e.clientX, y: e.clientY })}>{r}</button>)}
-      </div>}
-      <div className={`bubble ${big ? "big-emoji" : ""} ${m.payload.type === "file" ? "media-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""}`}
-        onPointerDown={startPress} onPointerUp={endPress} onPointerLeave={endPress} onPointerCancel={endPress}
-        onContextMenu={e => { e.preventDefault(); onReactBar(); }}
-        onClick={() => { if (m.status === "failed") onRetry(); }}>
-        {showName && sender && <small className="sender" style={{ color: `hsl(${hue(sender.avatarSeed)} 55% var(--name-l))` }}>{firstName(sender.displayName)}</small>}
-        {m.payload.type === "text" && <span className="text">{m.payload.text}</span>}
-        {m.payload.type === "file" && m.payload.attachment && <MediaBody att={m.payload.attachment} identity={identity} c={c} onOpenMedia={onOpenMedia}/>}
-        <small className="stamp">{time(m.createdAt)}{mine && <b className={`tick ${m.status ?? ""}`}>{m.status === "failed" ? " ⚠ tap to retry" : m.status === "sending" ? " ◌" : m.status === "read" ? " ✓✓" : " ✓"}</b>}</small>
-      </div>
-      {chips.length > 0 && <div className={`chips ${mine ? "chips-mine" : ""}`}>
-        {chips.map(([emoji, who]) => <button key={emoji} className={who.includes(me) ? "me" : ""} onClick={e => onReact(emoji, { x: e.clientX, y: e.clientY })}>{emoji}{who.length > 1 && <b>{who.length}</b>}</button>)}
-      </div>}
-      <button className="react-hint" aria-label="React" onClick={onReactBar}>☺</button>
-    </div>
-  </div>;
-}
-
-function MediaBody({ att, identity, c, onOpenMedia }: { att: AttachmentPayload; identity: LocalIdentity; c: Conversation; onOpenMedia(att: AttachmentPayload, url: string): void }) {
-  const gone = useAttachmentUrl(identity, c, att);
-  const kind = mediaKind(att);
-  if (kind === "image") return <ImageContent {...gone} att={att} onOpen={() => gone.url && onOpenMedia(att, gone.url)}/>;
-  if (kind === "video") return <VideoContent {...gone} att={att}/>;
-  if (kind === "audio") return <VoiceContent {...gone} att={att}/>;
-  return <FileContent {...gone} att={att} onOpen={() => void saveToDevice(att.fileId, att.name)}/>;
-}
