@@ -589,6 +589,9 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .member > span:not(.avatar):not(.member-emoji):not(.stack) { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .member strong { font-weight: 800; }
 .member:disabled { cursor: default; }
+/* a key change is the one thing in here worth interrupting someone over */
+.member-alert { background: rgba(255, 138, 128, .16); box-shadow: inset 0 0 0 1px rgba(255, 82, 66, .34); }
+.member-alert small { color: #b3261e; font-weight: 700; }
 .member-emoji {
   width: 54px; height: 54px; flex: none; border-radius: 20px; background: var(--grad-soft);
   border: 1px solid var(--glass-line); display: grid; place-items: center; font-size: 25px; box-shadow: var(--gloss);

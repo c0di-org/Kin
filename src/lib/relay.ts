@@ -9,16 +9,15 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function createRoom(id: string, kind: "group" | "direct", title: string, members: PublicMember[]): Promise<void> {
-  await json(`/api/rooms/${encodeURIComponent(id)}`, {
-    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, title, members })
-  });
-}
-
 async function signedJson<T>(identity: LocalIdentity, method: string, path: string, payload?: unknown): Promise<T> {
   const body = payload === undefined ? "" : JSON.stringify(payload);
   const auth = await signRequest(identity, method, path, body);
   return json<T>(path, { method, headers: { ...auth, "Content-Type": "application/json" }, body: body || undefined });
+}
+
+/** Signed, so the relay can tell a real creator from anyone squatting a room id they can derive. */
+export async function createRoom(identity: LocalIdentity, id: string, kind: "group" | "direct", title: string, members: PublicMember[]): Promise<void> {
+  await signedJson(identity, "PUT", `/api/rooms/${encodeURIComponent(id)}`, { kind, title, members });
 }
 
 export async function roomMembers(identity: LocalIdentity, roomId: string): Promise<PublicMember[]> {

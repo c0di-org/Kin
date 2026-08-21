@@ -1,0 +1,193 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import { ConversationRoom } from "./index";
+import {
+  directRoomId, newFixture, roomPath as url, sha256b64, signedRequest, signEnvelope, signHeaders,
+  type Fixture
+} from "./testing/harness";
+
+let f: Fixture;
+beforeEach(async () => { f = await newFixture(ConversationRoom); });
+
+describe("signed request authentication", () => {
+  it("accepts a correctly signed request from a member", async () => {
+    await f.seed();
+    const res = await f.room.fetch(await signedRequest(f.alice, "GET", url("/members")));
+    expect(res.status).toBe(200);
+    expect((await res.json() as unknown[]).length).toBe(2);
+  });
+
+  it("rejects a request signed by a non-member", async () => {
+    await f.seed();
+    expect((await f.room.fetch(await signedRequest(f.mallory, "GET", url("/members")))).status).toBe(401);
+  });
+
+  it("rejects a body that does not match the signed X-Kin-Body hash", async () => {
+    await f.seed();
+    // Sign a harmless body, then swap in a different one. Re-signing only the *claimed* hash
+    // leaves every signed POST body unauthenticated, so this must not verify.
+    const headers = await signHeaders(f.bob, "POST", url("/members"), JSON.stringify({ hello: "world" }));
+    const tampered = JSON.stringify({ ...f.alice.member(), signPublicJwk: f.mallory.signPublicJwk });
+    const res = await f.room.fetch(new Request(`https://kin.test${url("/members")}`, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: tampered
+    }));
+    expect(res.status).toBe(401);
+    expect(await f.storage.get<any>(`member:${f.alice.deviceId}`)).toMatchObject({ signPublicJwk: f.alice.signPublicJwk });
+  });
+
+  it("rejects a replayed signed request", async () => {
+    await f.seed();
+    const req = await signedRequest(f.alice, "GET", url("/members"));
+    expect((await f.room.fetch(req.clone())).status).toBe(200);
+    expect((await f.room.fetch(req.clone())).status).toBe(401);
+  });
+
+  it("rejects a stale timestamp", async () => {
+    await f.seed();
+    const path = url("/members");
+    const headers = await signHeaders(f.alice, "GET", path, "", undefined, Date.now() - 10 * 60_000);
+    expect((await f.room.fetch(new Request(`https://kin.test${path}`, { headers }))).status).toBe(401);
+  });
+
+  it("expires spent nonces on the sweep so signing stays possible forever", async () => {
+    await f.seed();
+    expect(f.storage.keys("nonce:").length).toBe(0);
+    await f.room.fetch(await signedRequest(f.alice, "GET", url("/members")));
+    expect(f.storage.keys("nonce:").length).toBe(1);
+    const key = f.storage.keys("nonce:")[0];
+    await f.storage.put(key, 1);
+    await f.room.alarm();
+    expect(f.storage.keys("nonce:").length).toBe(0);
+  });
+});
+
+describe("member roster authorization", () => {
+  it("lets a member update their own display card", async () => {
+    await f.seed();
+    const res = await f.room.fetch(await signedRequest(f.bob, "POST", url("/members"), { ...f.bob.member(), displayName: "Bobby" }));
+    expect(res.status).toBe(200);
+    expect(await f.storage.get<any>(`member:${f.bob.deviceId}`)).toMatchObject({ displayName: "Bobby" });
+  });
+
+  it("refuses to let one member overwrite another member's signing key", async () => {
+    await f.seed();
+    const impostor = { ...f.alice.member(), signPublicJwk: f.mallory.signPublicJwk };
+    const res = await f.room.fetch(await signedRequest(f.bob, "POST", url("/members"), impostor));
+    expect(res.status).toBe(403);
+    expect(await f.storage.get<any>(`member:${f.alice.deviceId}`)).toMatchObject({ signPublicJwk: f.alice.signPublicJwk });
+  });
+
+  it("refuses to let a member rename someone else, even leaving keys alone", async () => {
+    await f.seed();
+    const res = await f.room.fetch(await signedRequest(f.bob, "POST", url("/members"), { ...f.alice.member(), displayName: "Not Alice" }));
+    expect(res.status).toBe(403);
+    expect(await f.storage.get<any>(`member:${f.alice.deviceId}`)).toMatchObject({ displayName: "Alice" });
+  });
+
+  it("refuses to let a member rotate their own keys out from under the roster", async () => {
+    await f.seed();
+    const res = await f.room.fetch(await signedRequest(f.bob, "POST", url("/members"), { ...f.bob.member(), signPublicJwk: f.mallory.signPublicJwk }));
+    expect(res.status).toBe(403);
+    expect(await f.storage.get<any>(`member:${f.bob.deviceId}`)).toMatchObject({ signPublicJwk: f.bob.signPublicJwk });
+  });
+
+  it("still lets a member introduce someone new, which is how pairing works", async () => {
+    await f.seed("group", [f.alice]);
+    const res = await f.room.fetch(await signedRequest(f.alice, "POST", url("/members"), f.bob.member()));
+    expect(res.status).toBe(200);
+    expect(await f.storage.get(`member:${f.bob.deviceId}`)).toBeTruthy();
+  });
+});
+
+describe("room creation", () => {
+  const group = (f: Fixture) => ({ kind: "group" as const, title: "Family", members: [f.alice.member(), f.bob.member()] });
+
+  it("rejects an unsigned room creation", async () => {
+    const res = await f.room.fetch(new Request(`https://kin.test${url()}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(group(f))
+    }));
+    expect(res.status).toBe(401);
+    expect(await f.storage.get("meta")).toBeUndefined();
+  });
+
+  it("accepts a room creation signed by a listed member", async () => {
+    expect((await f.room.fetch(await signedRequest(f.alice, "PUT", url(), group(f)))).status).toBe(201);
+  });
+
+  it("rejects a room creation signed by someone not in the member list", async () => {
+    expect((await f.room.fetch(await signedRequest(f.mallory, "PUT", url(), group(f)))).status).toBe(403);
+  });
+
+  it("refuses to let an outsider squat the direct room between two other people", async () => {
+    const id = await directRoomId(f.alice.deviceId, f.bob.deviceId);
+    const body = { kind: "direct", title: "Alice", members: [f.alice.member(), f.bob.member(), f.mallory.member()] };
+    const res = await f.room.fetch(await signedRequest(f.mallory, "PUT", url("", id), body));
+    expect(res.status).toBe(403);
+    expect(await f.storage.get("meta")).toBeUndefined();
+  });
+
+  it("refuses a direct room whose id is not derived from its two members", async () => {
+    const body = { kind: "direct", title: "Bob", members: [f.alice.member(), f.bob.member()] };
+    expect((await f.room.fetch(await signedRequest(f.alice, "PUT", url("", "not-a-derived-id"), body))).status).toBe(403);
+  });
+
+  it("accepts the direct room its two participants derive", async () => {
+    const id = await directRoomId(f.alice.deviceId, f.bob.deviceId);
+    const body = { kind: "direct", title: "Bob", members: [f.alice.member(), f.bob.member()] };
+    expect((await f.room.fetch(await signedRequest(f.alice, "PUT", url("", id), body))).status).toBe(201);
+  });
+});
+
+describe("attachment uploads", () => {
+  const streamOf = (megabytes: number) => new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < megabytes; i++) controller.enqueue(new Uint8Array(1024 * 1024));
+      controller.close();
+    }
+  });
+
+  it("caps an upload that arrives without a Content-Length", async () => {
+    await f.seed();
+    const path = url("/files/bigfile");
+    const headers = await signHeaders(f.alice, "PUT", path, "", await sha256b64("streamed"));
+    const res = await f.room.fetch(new Request(`https://kin.test${path}`, { method: "PUT", headers, body: streamOf(30), duplex: "half" } as RequestInit));
+    expect(res.status).toBe(413);
+    expect(f.env.ATTACHMENTS.objects.size).toBe(0);
+  });
+
+  it("rejects bytes that disagree with the signed digest", async () => {
+    await f.seed();
+    const path = url("/files/swapped");
+    const headers = await signHeaders(f.alice, "PUT", path, "", await sha256b64("the file I signed"));
+    const res = await f.room.fetch(new Request(`https://kin.test${path}`, {
+      method: "PUT", headers, body: new TextEncoder().encode("a different file entirely")
+    }));
+    expect(res.status).toBe(400);
+    expect(f.env.ATTACHMENTS.objects.size).toBe(0);
+  });
+
+  it("stores an upload whose bytes match the signed digest", async () => {
+    await f.seed();
+    const path = url("/files/photo1");
+    const bytes = new TextEncoder().encode("ciphertext");
+    const headers = await signHeaders(f.alice, "PUT", path, "", await sha256b64(bytes));
+    const res = await f.room.fetch(new Request(`https://kin.test${path}`, { method: "PUT", headers, body: bytes }));
+    expect(res.status).toBe(201);
+    expect(f.env.ATTACHMENTS.objects.size).toBe(1);
+  });
+});
+
+describe("envelopes", () => {
+  it("accepts a properly signed envelope and rejects a forged one", async () => {
+    await f.seed();
+    const now = Date.now();
+    const base = {
+      kind: "message", id: crypto.randomUUID(), conversationId: "family-room-1", senderDeviceId: f.alice.deviceId,
+      createdAt: now, expiresAt: now + 86_400_000, iv: "aXY", ciphertext: "Y3Q"
+    };
+    const post = (envelope: unknown) => f.room.fetch(new Request(`https://kin.test${url("/messages")}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(envelope)
+    }));
+    expect((await post(await signEnvelope(f.alice, base))).status).toBe(202);
+    expect((await post(await signEnvelope(f.mallory, { ...base, id: crypto.randomUUID() }))).status).toBe(401);
+  });
+});

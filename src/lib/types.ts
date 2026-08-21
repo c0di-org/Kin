@@ -23,6 +23,8 @@ export type Conversation = {
   lastPreviewSender?: string;
   lastReadAt?: number;
   unread?: number;
+  /** Device ids whose keys changed under us — a warning that outlives a reload. */
+  keyAlerts?: string[];
 };
 
 export type AttachmentPayload = {

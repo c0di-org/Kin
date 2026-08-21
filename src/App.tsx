@@ -6,6 +6,7 @@ import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, r
 import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile, websocketUrl } from "./lib/relay";
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
+import { applyRoster } from "./lib/roster";
 import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
 import { confetti, emojiBurst, isCelebration } from "./lib/effects";
 import Aurora from "./components/Aurora";
@@ -200,7 +201,12 @@ export default function App() {
       try { for (const env of await roomHistory(id, convId)) await ingest(convId, env, false); } catch { /* offline */ }
       const conv = (await listConversations()).find(c => c.id === convId);
       if (conv?.kind === "group") {
-        try { await putConversation({ ...conv, members: await roomMembers(id, convId) }); await refresh(); } catch { /* offline */ }
+        try {
+          const { conversation, refused } = applyRoster(conv, await roomMembers(id, convId));
+          refused.forEach(warnKeyChange);
+          await putConversation(conversation);
+          await refresh();
+        } catch { /* offline */ }
       }
       const socket = new WebSocket(await websocketUrl(id, convId));
       socket.onmessage = ev => { void handleFrame(convId, String(ev.data)); };
@@ -224,11 +230,11 @@ export default function App() {
       const member = f.member;
       const conv = (await listConversations()).find(c => c.id === convId);
       if (conv) {
-        const known = conv.members.some(m => m.deviceId === member.deviceId);
-        const members = known ? conv.members.map(m => m.deviceId === member.deviceId ? member : m) : [...conv.members, member];
+        const { conversation, refused } = applyRoster(conv, [member]);
+        if (refused.length) warnKeyChange(refused[0]);
         // a direct chat is titled after the other person, so a rename has to move the title too
-        const peerRenamed = conv.kind === "direct" && member.deviceId !== me.deviceId;
-        await putConversation({ ...conv, members, ...(peerRenamed ? { title: member.displayName } : {}) });
+        const peerRenamed = conv.kind === "direct" && member.deviceId !== me.deviceId && !refused.length;
+        await putConversation({ ...conversation, ...(peerRenamed ? { title: member.displayName } : {}) });
         await refresh();
       }
     }
@@ -269,6 +275,16 @@ export default function App() {
         if (activeAndVisible) sendReadFrame(convId, m.id);
       }
     } catch { /* not for us */ }
+  }
+
+  /**
+   * Somebody's device keys changed under us. We keep the keys we paired with, so anything signed
+   * with the new one now fails verifyEnvelope and never renders — but that is silent, and a real
+   * key change is indistinguishable from an impersonation attempt without a human looking. Say so.
+   */
+  function warnKeyChange(member: PublicMember): void {
+    flash(`⚠️ ${firstName(member.displayName)}'s security keys changed — check with them in person`);
+    buzz(40);
   }
 
   function sendReadFrame(convId: string, messageId: string): void {
@@ -555,7 +571,7 @@ export default function App() {
     const id = { ...(await generateIdentity(name)), avatarSeed: `e:${avatar}` };
     const group: Conversation = { id: randomId(), kind: "group", title: familyName, key: randomKey(), members: [publicMember(id)], createdAt: Date.now() };
     await putIdentity(id); await putConversation(group);
-    try { await createRoom(group.id, "group", group.title, group.members); } catch { /* retried on next connect */ }
+    try { await createRoom(id, group.id, "group", group.title, group.members); } catch { /* retried on next connect */ }
     setIdentity(id); await refresh(); setActiveId(group.id);
     confetti(); sounds.tada();
   }
@@ -622,7 +638,7 @@ export default function App() {
     setPanel("none");
     if (existing) return setActiveId(existing.id); // don't clobber the history we already have
     const c: Conversation = { id: d.id, kind: "direct", title: peer.displayName, key: d.key, members: [publicMember(identity), peer], createdAt: Date.now() };
-    try { await createRoom(c.id, "direct", c.title, c.members); } catch { /* offline */ }
+    try { await createRoom(identity, c.id, "direct", c.title, c.members); } catch { /* offline */ }
     await putConversation(c); await refresh(); setActiveId(c.id);
   }
 
@@ -838,9 +854,15 @@ export default function App() {
       </>}
       {panel === "members" && active && <>
         <div className="sheet-title"><h2>{active.title} 🏡</h2><button onClick={() => void startPairing()} aria-label="Invite">💌</button></div>
-        {active.members.map(m => <button className="member" key={m.deviceId} disabled={m.deviceId === identity.deviceId} onClick={() => void privateChat(m)}>
-          <Avatar member={m}/><span><strong>{m.displayName}{m.deviceId === identity.deviceId ? " · you" : ""}</strong><small>{m.deviceId === identity.deviceId ? "This device" : "Tap for a private chat"}</small></span>
-        </button>)}
+        {active.members.map(m => {
+          const alerted = active.keyAlerts?.includes(m.deviceId);
+          return <button className={`member${alerted ? " member-alert" : ""}`} key={m.deviceId} disabled={m.deviceId === identity.deviceId} onClick={() => void privateChat(m)}>
+            <Avatar member={m}/><span>
+              <strong>{alerted ? "⚠️ " : ""}{m.displayName}{m.deviceId === identity.deviceId ? " · you" : ""}</strong>
+              <small>{alerted ? "Security keys changed — check with them in person" : m.deviceId === identity.deviceId ? "This device" : "Tap for a private chat"}</small>
+            </span>
+          </button>;
+        })}
       </>}
       {panel === "profile" && <ProfileEditor identity={identity} onCancel={() => setPanel("settings")} onSave={(n, a) => void saveProfile(n, a)}/>}
       {panel === "settings" && <>

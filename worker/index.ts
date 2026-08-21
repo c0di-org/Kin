@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { sendPushNotification, type PushSubscriptionJSON } from "./webpush";
+import { b64urlToBytes, bytesToB64url, sendPushNotification, type PushSubscriptionJSON } from "./webpush";
 
 type Member = {
   deviceId: string;
@@ -41,15 +41,6 @@ const MESSAGE_TTL = 7 * 24 * 60 * 60 * 1000;
 const PAIR_TTL = 10 * 60 * 1000;
 const MAX_FILE = 25 * 1024 * 1024;
 
-function b64urlToBytes(value: string): Uint8Array<ArrayBuffer> {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "===".slice((normalized.length + 3) % 4);
-  const binary = atob(padded);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
-}
-
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }
@@ -67,6 +58,32 @@ function code(): string {
 }
 function envelopeText(envelope: Envelope): string {
   return [envelope.id, envelope.conversationId, envelope.senderDeviceId, envelope.createdAt, envelope.expiresAt, envelope.iv, envelope.ciphertext].join("\n");
+}
+async function sha256b64(bytes: Uint8Array): Promise<string> {
+  return bytesToB64url(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>)));
+}
+/** The client half of this lives in `directConversation` (src/lib/crypto.ts); the two must agree. */
+async function directRoomId(a: string, b: string): Promise<string> {
+  return (await sha256b64(enc.encode(`kin-direct-room:${[a, b].sort().join(":")}`))).slice(0, 32);
+}
+const TOO_LARGE = "kin-file-too-large";
+/** Abort a stream once it exceeds `limit`, because Content-Length is a hint a chunked upload omits. */
+function capped(limit: number): TransformStream<Uint8Array, Uint8Array> {
+  let seen = 0;
+  return new TransformStream({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (seen > limit) controller.error(new Error(TOO_LARGE));
+      else controller.enqueue(chunk);
+    }
+  });
+}
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+}
+function sameJwk(a: JsonWebKey | undefined, b: JsonWebKey | undefined): boolean {
+  if (!a || !b) return false;
+  return a.kty === b.kty && a.crv === b.crv && a.x === b.x && a.y === b.y;
 }
 async function verifyEcdsa(jwk: JsonWebKey, signature: string, text: string): Promise<boolean> {
   try {
@@ -161,18 +178,55 @@ export class ConversationRoom extends DurableObject<Env> {
     return [...rows.values()];
   }
 
-  private async verifySignedRequest(request: Request, path = new URL(request.url).pathname): Promise<Member | null> {
+  /**
+   * Burn a nonce, refusing one we have already seen. Without this a signed request can be
+   * replayed freely for the whole MAX_SKEW window, which for POSTs means replaying the write.
+   */
+  private async claimNonce(deviceId: string, nonce: string, signedAt: number): Promise<boolean> {
+    const key = `nonce:${deviceId}:${nonce}`;
+    if (await this.ctx.storage.get(key)) return false;
+    const expiresAt = signedAt + MAX_SKEW;
+    await this.ctx.storage.put(key, expiresAt);
+    await this.scheduleSweep(expiresAt);
+    return true;
+  }
+
+  /**
+   * Verify the X-Kin-* signature over a request. `bodyHash` is the SHA-256 the caller has
+   * computed over the bytes actually received: the signature commits to a body digest, so
+   * comparing it against the real body is what makes a signed request cover its payload
+   * rather than only its headers.
+   *
+   * `signer` exists for room creation, where the roster is still empty and the signature has
+   * to be checked against a member card the body itself claims.
+   */
+  private async verifySigned(
+    request: Request,
+    bodyHash: string,
+    signer: (deviceId: string) => Promise<Member | undefined> | Member | undefined = id => this.member(id),
+    path = new URL(request.url).pathname
+  ): Promise<Member | null> {
     const device = request.headers.get("X-Kin-Device");
     const time = request.headers.get("X-Kin-Time");
     const nonce = request.headers.get("X-Kin-Nonce");
-    const body = request.headers.get("X-Kin-Body");
+    const claimedHash = request.headers.get("X-Kin-Body");
     const sig = request.headers.get("X-Kin-Signature");
-    if (!device || !time || !nonce || !body || !sig) return null;
+    if (!device || !time || !nonce || !claimedHash || !sig) return null;
     if (Math.abs(Date.now() - Number(time)) > MAX_SKEW) return null;
-    const member = await this.member(device);
+    if (claimedHash !== bodyHash) return null;
+    const member = await signer(device);
     if (!member) return null;
-    const canonical = [request.method.toUpperCase(), path, time, nonce, body].join("\n");
-    return (await verifyEcdsa(member.signPublicJwk, sig, canonical)) ? member : null;
+    const canonical = [request.method.toUpperCase(), path, time, nonce, claimedHash].join("\n");
+    if (!(await verifyEcdsa(member.signPublicJwk, sig, canonical))) return null;
+    if (!(await this.claimNonce(device, nonce, Number(time)))) return null;
+    return member;
+  }
+
+  /** Verification for the JSON endpoints, whose bodies are small enough to buffer and re-hash. */
+  private async verifySignedRequest(request: Request): Promise<{ member: Member; body: string } | null> {
+    const body = await request.text();
+    const member = await this.verifySigned(request, await sha256b64(enc.encode(body)));
+    return member ? { member, body } : null;
   }
 
   private async verifyWs(url: URL): Promise<Member | null> {
@@ -186,7 +240,9 @@ export class ConversationRoom extends DurableObject<Env> {
     const member = await this.member(device);
     if (!member) return null;
     const canonical = ["GET", url.pathname, time, nonce, body].join("\n");
-    return (await verifyEcdsa(member.signPublicJwk, sig, canonical)) ? member : null;
+    if (!(await verifyEcdsa(member.signPublicJwk, sig, canonical))) return null;
+    if (!(await this.claimNonce(device, nonce, Number(time)))) return null;
+    return member;
   }
 
   private async verifyEnvelope(envelope: Envelope): Promise<boolean> {
@@ -215,10 +271,15 @@ export class ConversationRoom extends DurableObject<Env> {
     const key = `msg:${String(envelope.createdAt).padStart(16, "0")}:${envelope.id}`;
     if (await this.ctx.storage.get(key)) return false;
     await this.ctx.storage.put(key, envelope);
-    const current = await this.ctx.storage.getAlarm();
-    const next = Math.min(envelope.expiresAt, Date.now() + 60 * 60_000);
-    if (!current || next < current) await this.ctx.storage.setAlarm(next);
+    await this.scheduleSweep(envelope.expiresAt);
     return true;
+  }
+
+  /** Pull the retention alarm earlier if this deadline lands before the one already set. */
+  private async scheduleSweep(at: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    const next = Math.min(at, Date.now() + 60 * 60_000);
+    if (!current || next < current) await this.ctx.storage.setAlarm(next);
   }
 
   private async notifyOthers(senderDeviceId: string, conversationId: string): Promise<void> {
@@ -251,18 +312,60 @@ export class ConversationRoom extends DurableObject<Env> {
   }
 
   private async createRoom(roomId: string, request: Request): Promise<Response> {
+    const bodyText = await request.text();
+    let body: { kind: "group" | "direct"; title: string; members: Member[] };
+    try { body = JSON.parse(bodyText); } catch { return error("Invalid body"); }
+    const members = (body.members ?? []).slice(0, 64);
+    if (!members.length) return error("Missing members");
+
+    // Nothing is stored yet, so there is no roster to check the signature against. Requiring the
+    // creator to sign as one of the members they are listing is what proves a real device is
+    // behind the room, instead of first-writer-wins.
+    const device = request.headers.get("X-Kin-Device");
+    if (!device || !request.headers.get("X-Kin-Signature")) return error("Unauthorized", 401);
+    const claimed = members.find(m => m.deviceId === device);
+    if (!claimed) return error("Creator must be one of the members", 403);
+    const creator = await this.verifySigned(request, await sha256b64(enc.encode(bodyText)), () => claimed);
+    if (!creator) return error("Unauthorized", 401);
+
     const existing = await this.meta();
-    const body = await request.json() as { kind: "group" | "direct"; title: string; members: Member[] };
     if (existing) return json(existing);
-    if (!body.members?.length) return error("Missing members");
+
+    // A direct room's id is a hash of exactly the two device ids in it, so recomputing it here
+    // binds the room to its participants. Everyone in a family knows everyone's device ids, so
+    // without this any member can pre-create — and sit inside — the DM between two other people.
+    if (body.kind === "direct") {
+      if (members.length !== 2) return error("A direct room holds exactly two members", 403);
+      if (roomId !== await directRoomId(members[0].deviceId, members[1].deviceId)) {
+        return error("Direct room id must be derived from its members", 403);
+      }
+    }
+
     const meta: RoomMeta = { id: roomId, kind: body.kind, title: body.title.slice(0, 80), createdAt: Date.now() };
     await this.ctx.storage.put("meta", meta);
-    for (const member of body.members.slice(0, 64)) await this.ctx.storage.put(`member:${member.deviceId}`, member);
+    for (const member of members) await this.ctx.storage.put(`member:${member.deviceId}`, member);
     return json(meta, 201);
   }
 
-  private async putMember(request: Request): Promise<Response> {
-    const member = await request.json() as Member;
+  private async putMember(requester: Member, body: string): Promise<Response> {
+    let incoming: Member;
+    try { incoming = JSON.parse(body); } catch { return error("Invalid body"); }
+    if (!incoming?.deviceId || !incoming.signPublicJwk || !incoming.dhPublicJwk) return error("Invalid member");
+
+    const existing = await this.member(incoming.deviceId);
+    if (existing) {
+      // Introducing somebody new is the pairing flow and stays open to any member. Rewriting a
+      // card that already exists is not: only its owner may touch it, and never its keys. A
+      // device that needs fresh keys gets a fresh deviceId, so a key change on a known member is
+      // always somebody swapping themselves in as that person.
+      if (requester.deviceId !== incoming.deviceId) return error("Not your member card", 403);
+      if (!sameJwk(existing.signPublicJwk, incoming.signPublicJwk)) return error("Device keys are immutable", 403);
+      if (!sameJwk(existing.dhPublicJwk, incoming.dhPublicJwk)) return error("Device keys are immutable", 403);
+    }
+
+    const member: Member = existing
+      ? { ...existing, displayName: String(incoming.displayName ?? "").slice(0, 64), avatarSeed: String(incoming.avatarSeed ?? "").slice(0, 64) }
+      : { ...incoming, displayName: String(incoming.displayName ?? "").slice(0, 64), avatarSeed: String(incoming.avatarSeed ?? "").slice(0, 64) };
     await this.ctx.storage.put(`member:${member.deviceId}`, member);
     this.broadcast({ kind: "member", member });
     return json({ ok: true });
@@ -284,18 +387,38 @@ export class ConversationRoom extends DurableObject<Env> {
     return json({ ok: true }, 202);
   }
 
-  private async registerPush(request: Request, member: Member): Promise<Response> {
-    const sub = await request.json() as PushSubscriptionJSON;
+  private async registerPush(member: Member, body: string): Promise<Response> {
+    let sub: PushSubscriptionJSON;
+    try { sub = JSON.parse(body); } catch { return error("Invalid body"); }
     if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) return error("Invalid subscription");
     await this.ctx.storage.put(`push:${member.deviceId}`, sub);
     return json({ ok: true });
   }
 
-  private async putFile(request: Request, key: string): Promise<Response> {
-    const length = Number(request.headers.get("Content-Length") ?? 0);
-    if (length && length > MAX_FILE + 64 * 1024) return error("File too large", 413);
+  /**
+   * Attachments stream straight to R2 rather than being buffered, so the body is not re-hashed
+   * here the way the JSON endpoints are. Two guards stand in for that: a counting stream that
+   * aborts past the cap even when no Content-Length was declared, and the signed digest passed
+   * to R2 as an upload checksum, which fails the write if the bytes disagree with the signature.
+   */
+  private async putFile(request: Request, fileId: string, key: string): Promise<Response> {
+    const limit = MAX_FILE + 64 * 1024;
+    if (Number(request.headers.get("Content-Length") ?? 0) > limit) return error("File too large", 413);
+    const claimedDigest = request.headers.get("X-Kin-Body") ?? "";
+    const signed = await this.verifySigned(request, claimedDigest);
+    if (!signed) return error("Unauthorized", 401);
     if (!request.body) return error("Missing file");
-    await this.env.ATTACHMENTS.put(key, request.body, { httpMetadata: { contentType: "application/octet-stream" } });
+    const digest = b64urlToBytes(claimedDigest);
+    if (digest.byteLength !== 32) return error("Invalid content hash");
+    try {
+      await this.env.ATTACHMENTS.put(key, request.body.pipeThrough(capped(limit)), {
+        httpMetadata: { contentType: "application/octet-stream" },
+        sha256: toHex(digest)
+      });
+    } catch (err) {
+      try { await this.env.ATTACHMENTS.delete(key); } catch { /* nothing landed */ }
+      return String(err).includes(TOO_LARGE) ? error("File too large", 413) : error("Upload rejected", 400);
+    }
     return json({ ok: true }, 201);
   }
 
@@ -336,8 +459,9 @@ export class ConversationRoom extends DurableObject<Env> {
       return json(await this.allMembers());
     }
     if (tail === "/members" && request.method === "POST") {
-      if (!(await this.verifySignedRequest(request))) return error("Unauthorized", 401);
-      return this.putMember(request);
+      const signed = await this.verifySignedRequest(request);
+      if (!signed) return error("Unauthorized", 401);
+      return this.putMember(signed.member, signed.body);
     }
     if (tail === "/history" && request.method === "GET") {
       if (!(await this.verifySignedRequest(request))) return error("Unauthorized", 401);
@@ -347,18 +471,19 @@ export class ConversationRoom extends DurableObject<Env> {
       return this.postMessage(request, meta);
     }
     if (tail === "/push" && request.method === "POST") {
-      const member = await this.verifySignedRequest(request);
-      if (!member) return error("Unauthorized", 401);
-      return this.registerPush(request, member);
+      const signed = await this.verifySignedRequest(request);
+      if (!signed) return error("Unauthorized", 401);
+      return this.registerPush(signed.member, signed.body);
     }
 
     const fileMatch = tail.match(/^\/files\/([A-Za-z0-9_-]+)$/);
     if (fileMatch) {
-      const member = await this.verifySignedRequest(request);
-      if (!member) return error("Unauthorized", 401);
       const key = `rooms/${roomId}/${fileMatch[1]}`;
-      if (request.method === "PUT") return this.putFile(request, key);
-      if (request.method === "GET") return this.getFile(key);
+      if (request.method === "PUT") return this.putFile(request, fileMatch[1], key);
+      if (request.method === "GET") {
+        if (!(await this.verifySignedRequest(request))) return error("Unauthorized", 401);
+        return this.getFile(key);
+      }
     }
 
     return error("Not found", 404);
@@ -380,14 +505,19 @@ export class ConversationRoom extends DurableObject<Env> {
   async webSocketError(): Promise<void> {}
 
   async alarm(): Promise<void> {
-    const rows = await this.ctx.storage.list<Envelope>({ prefix: "msg:" });
     const now = Date.now();
     let next = Number.POSITIVE_INFINITY;
     const deletes: string[] = [];
-    for (const [key, envelope] of rows) {
+
+    for (const [key, envelope] of await this.ctx.storage.list<Envelope>({ prefix: "msg:" })) {
       if (envelope.expiresAt <= now) deletes.push(key);
       else next = Math.min(next, envelope.expiresAt);
     }
+    for (const [key, expiresAt] of await this.ctx.storage.list<number>({ prefix: "nonce:" })) {
+      if (expiresAt <= now) deletes.push(key);
+      else next = Math.min(next, expiresAt);
+    }
+
     if (deletes.length) await this.ctx.storage.delete(deletes);
     if (Number.isFinite(next)) await this.ctx.storage.setAlarm(Math.min(next, now + 60 * 60_000));
   }
