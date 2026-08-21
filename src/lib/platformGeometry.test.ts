@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeGeometry, type Frame, type Insets } from "./platformGeometry";
+import { computeGeometry, type Frame } from "./platformGeometry";
 
 const PHONE = 896;      // screen height in CSS px
 const INDICATOR = 34;   // home indicator
@@ -8,8 +8,8 @@ const KEYBOARD = 340;
 
 const frame = (height: number, bottom: number, top = 47): Frame =>
   ({ height, insets: { top, right: 0, bottom, left: 0 } });
-const geometry = (f: Frame, viewportTop: number, viewportHeight: number, insets: Insets = f.insets) =>
-  computeGeometry(f, insets, viewportTop, viewportHeight);
+const geometry = (f: Frame, viewportTop: number, viewportHeight: number) =>
+  computeGeometry(f, viewportTop, viewportHeight);
 
 describe("computeGeometry", () => {
   it("keeps content off the home indicator in a standalone PWA", () => {
@@ -55,11 +55,5 @@ describe("computeGeometry", () => {
     expect(g["--viewport-top"]).toBe(60);
     expect(g["--shell-height"]).toBe(PHONE - 60);
     expect(g["--safe-bottom"]).toBe(INDICATOR);
-  });
-
-  it("prefers native insets over what env() resolved to", () => {
-    const g = geometry(frame(PHONE, 0, 0), 0, PHONE, { top: 24, right: 0, bottom: 48, left: 0 });
-    expect(g["--safe-top"]).toBe(24);
-    expect(g["--safe-bottom"]).toBe(48);
   });
 });

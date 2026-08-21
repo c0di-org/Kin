@@ -1,24 +1,4 @@
 export type Insets = { top: number; right: number; bottom: number; left: number };
-export const NATIVE_INSET_BRIDGE = "__TAURI_VIBE_INSETS__";
-const ZERO_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
-type NativeInsetBridge = { insets: () => string };
-export function parseInsets(value: unknown): Insets | null {
-  if (!value || typeof value !== "object") return null;
-  const input = value as Partial<Insets>;
-  for (const edge of ["top", "right", "bottom", "left"] as const) {
-    const n = input[edge];
-    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return null;
-  }
-  return input as Insets;
-}
-function nativeBridge(): NativeInsetBridge | undefined {
-  return (window as unknown as Record<string, NativeInsetBridge | undefined>)[NATIVE_INSET_BRIDGE];
-}
-export function readNativeInsets(): Insets | null {
-  const bridge = nativeBridge();
-  if (!bridge || typeof bridge.insets !== "function") return null;
-  try { return parseInsets(JSON.parse(bridge.insets())); } catch { return null; }
-}
 
 /** The screen a `position: fixed` layer actually gets, plus what env(safe-area-inset-*) resolves to on it. */
 export type Frame = { insets: Insets; height: number };
@@ -40,14 +20,6 @@ function measureFrame(): Frame {
   return frame;
 }
 
-export function applyNativeInsets(insets: Insets): void {
-  const style = document.documentElement.style;
-  style.setProperty("--native-inset-top", `${insets.top}px`);
-  style.setProperty("--native-inset-right", `${insets.right}px`);
-  style.setProperty("--native-inset-bottom", `${insets.bottom}px`);
-  style.setProperty("--native-inset-left", `${insets.left}px`);
-}
-
 /**
  * Publishes two independent things and never mixes them:
  *
@@ -55,16 +27,17 @@ export function applyNativeInsets(insets: Insets): void {
  *   --safe-*                     how far content has to stay off each edge *right now*.
  *
  * The bottom is the one everybody gets wrong, because three different things can eat it — the home
- * indicator, Safari's toolbar and the on-screen keyboard — and they overlap rather than stack. So
- * instead of guessing which is in play (standalone? tab? keyboard?) we measure where the browser
- * stops showing us pixels and compare that against where the home indicator starts. Whichever bites
- * first wins, once. That is what kills the double padding: --safe-bottom is already the final answer,
- * so no rule downstream ever adds or subtracts an inset again.
+ * indicator, the browser's own toolbar and the on-screen keyboard — and they overlap rather than
+ * stack. So instead of guessing which is in play (standalone? tab? keyboard?) we measure where the
+ * browser stops showing us pixels and compare that against where the home indicator starts.
+ * Whichever bites first wins, once. That is what kills the double padding: --safe-bottom is already
+ * the final answer, so no rule downstream ever adds or subtracts an inset again.
  */
-export function computeGeometry(frame: Frame, insets: Insets, viewportTop: number, viewportHeight: number): Record<string, number> {
+export function computeGeometry(frame: Frame, viewportTop: number, viewportHeight: number): Record<string, number> {
+  const { insets } = frame;
   const screen = Math.max(frame.height, viewportTop + viewportHeight);
-  // The last row of pixels the browser is actually showing us: top of the keyboard, top of Safari's
-  // toolbar, or the bottom of the screen — whichever comes first.
+  // The last row of pixels the browser is actually showing us: top of the keyboard, top of the
+  // browser's toolbar, or the bottom of the screen — whichever comes first.
   const shown = Math.min(screen, viewportTop + viewportHeight);
   // The last row content may sit on without the home indicator crossing it.
   const clear = screen - insets.bottom;
@@ -88,33 +61,22 @@ export function computeGeometry(frame: Frame, insets: Insets, viewportTop: numbe
 
 function update(): void {
   const style = document.documentElement.style;
-  const native = readNativeInsets();
-  if (native) applyNativeInsets(native);
   const frame = measureFrame();
   const vv = window.visualViewport;
-  const geometry = computeGeometry(
-    frame,
-    native ?? frame.insets,
-    Math.max(0, Math.round(vv?.offsetTop ?? 0)),
-    Math.round(vv?.height ?? frame.height),
-  );
+  const geometry = computeGeometry(frame, Math.max(0, Math.round(vv?.offsetTop ?? 0)), Math.round(vv?.height ?? frame.height));
   for (const [name, value] of Object.entries(geometry)) style.setProperty(name, `${value}px`);
 }
 
 export function installPlatformGeometry(): () => void {
-  applyNativeInsets(readNativeInsets() ?? ZERO_INSETS);
   update();
   window.addEventListener("resize", update);
   window.addEventListener("orientationchange", update);
   window.visualViewport?.addEventListener("resize", update);
   window.visualViewport?.addEventListener("scroll", update);
-  const onNativeInsets = () => update();
-  window.addEventListener("native-insets-changed", onNativeInsets);
   return () => {
     window.removeEventListener("resize", update);
     window.removeEventListener("orientationchange", update);
     window.visualViewport?.removeEventListener("resize", update);
     window.visualViewport?.removeEventListener("scroll", update);
-    window.removeEventListener("native-insets-changed", onNativeInsets);
   };
 }

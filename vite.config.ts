@@ -23,8 +23,12 @@ export default defineConfig({
         scope: "/",
         display: "standalone",
         display_override: ["standalone", "minimal-ui"],
-        background_color: "#e7edff",
-        theme_color: "#e7edff",
+        // Android paints its PWA splash from these and a manifest cannot media-query, so one theme
+        // has to win. Dark: a light splash dropping into the dark app is the harsh direction, and
+        // the candy icon reads better on deep indigo than on pale blue. The live status bar is
+        // still theme-aware — index.html carries media-scoped <meta name="theme-color">.
+        background_color: "#0d1026",
+        theme_color: "#0d1026",
         orientation: "portrait-primary",
         categories: ["social", "communication"],
         icons: [

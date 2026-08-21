@@ -9,6 +9,12 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Kin" />
+    <style>
+      /* First paint, before styles.css lands. Same colours as --bg in both themes, so a cold load
+         on Android never flashes white behind the app. Manifests cannot media-query; this can. */
+      html, body { margin: 0; background: #e7edff; }
+      @media (prefers-color-scheme: dark) { html, body { background: #0d1026; } }
+    </style>
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml" />
     <title>Kin</title>
