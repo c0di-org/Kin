@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { decryptPayload, directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, verifyEnvelope, wrapConversationKey } from "./lib/crypto";
 import { deleteMessage, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage } from "./lib/db";
@@ -378,6 +378,26 @@ export default function App() {
 
   useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }); }, [activeMessages.length, typing.length, activeId]);
 
+  // The composer floats over the message list rather than pushing it up, so the list reserves room
+  // for it in padding — which only works if we tell CSS how tall the composer actually is right now
+  // (it grows with a long draft, and again while recording).
+  const composerSize = useRef<ResizeObserver | null>(null);
+  const composerBox = useCallback((el: HTMLDivElement | null) => {
+    composerSize.current?.disconnect();
+    composerSize.current = null;
+    const root = document.documentElement.style;
+    if (!el) { root.removeProperty("--composer-h"); return; }
+    const measure = () => {
+      root.setProperty("--composer-h", `${Math.round(el.offsetHeight)}px`);
+      const list = scroll.current;
+      // re-pin only if we were already at the bottom, so growing the draft never yanks the reader up
+      if (list && list.scrollHeight - list.scrollTop - list.clientHeight < 120) list.scrollTop = list.scrollHeight;
+    };
+    measure();
+    composerSize.current = new ResizeObserver(measure);
+    composerSize.current.observe(el);
+  }, []);
+
   // the keyboard shrinks the viewport under us — keep the newest message in sight
   useEffect(() => {
     const vv = window.visualViewport; if (!vv) return;
@@ -746,7 +766,7 @@ export default function App() {
           {typingNames.length > 0 && <div className="typing"><i/><i/><i/></div>}
         </div>
 
-        <div className="composer">
+        <div className="composer" ref={composerBox}>
           <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden onChange={e => { const f = e.target.files?.[0]; if (f && active) void sendFile(active, f); e.currentTarget.value = ""; }}/>
           <input ref={mediaInput} type="file" accept="image/*,video/*" multiple hidden onChange={e => { const fs = [...(e.target.files ?? [])]; if (active) fs.forEach(f => void sendFile(active, f)); e.currentTarget.value = ""; }}/>
           <input ref={fileInput} type="file" hidden onChange={e => { const f = e.target.files?.[0]; if (f && active) void sendFile(active, f); e.currentTarget.value = ""; }}/>

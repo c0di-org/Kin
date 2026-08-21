@@ -20,27 +20,24 @@ export function readNativeInsets(): Insets | null {
   try { return parseInsets(JSON.parse(bridge.insets())); } catch { return null; }
 }
 
-/** Read what env(safe-area-inset-*) actually resolves to right now, so JS can reason about it. */
-function measureEnvInsets(): Insets {
+/** The screen a `position: fixed` layer actually gets, plus what env(safe-area-inset-*) resolves to on it. */
+export type Frame = { insets: Insets; height: number };
+
+/** One hidden probe answers both questions at once, so the two can never disagree. */
+function measureFrame(): Frame {
   const probe = document.createElement("div");
-  probe.style.cssText = "position:fixed;top:0;left:0;visibility:hidden;pointer-events:none;"
+  probe.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;visibility:hidden;pointer-events:none;"
     + "padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);"
     + "padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);";
   document.body.appendChild(probe);
   const style = getComputedStyle(probe);
   const px = (v: string): number => Math.max(0, Math.round(parseFloat(v) || 0));
-  const insets = { top: px(style.paddingTop), right: px(style.paddingRight), bottom: px(style.paddingBottom), left: px(style.paddingLeft) };
+  const frame: Frame = {
+    insets: { top: px(style.paddingTop), right: px(style.paddingRight), bottom: px(style.paddingBottom), left: px(style.paddingLeft) },
+    height: Math.round(probe.getBoundingClientRect().height) || window.innerHeight,
+  };
   probe.remove();
-  return insets;
-}
-
-/** A browser tab already keeps its own chrome clear of the home indicator — only installed/native windows own it. */
-function ownsScreenEdges(): boolean {
-  return !!nativeBridge()
-    || window.matchMedia("(display-mode: standalone)").matches
-    || window.matchMedia("(display-mode: fullscreen)").matches
-    || window.matchMedia("(display-mode: window-controls-overlay)").matches
-    || ("standalone" in navigator && (navigator as Navigator & { standalone?: boolean }).standalone === true);
+  return frame;
 }
 
 export function applyNativeInsets(insets: Insets): void {
@@ -51,50 +48,73 @@ export function applyNativeInsets(insets: Insets): void {
   style.setProperty("--native-inset-left", `${insets.left}px`);
 }
 
-function updateInsets(): void {
+/**
+ * Publishes two independent things and never mixes them:
+ *
+ *   --shell-height / --inset-*   the physical screen. Backgrounds use this and stay safe-area-blind.
+ *   --safe-*                     how far content has to stay off each edge *right now*.
+ *
+ * The bottom is the one everybody gets wrong, because three different things can eat it — the home
+ * indicator, Safari's toolbar and the on-screen keyboard — and they overlap rather than stack. So
+ * instead of guessing which is in play (standalone? tab? keyboard?) we measure where the browser
+ * stops showing us pixels and compare that against where the home indicator starts. Whichever bites
+ * first wins, once. That is what kills the double padding: --safe-bottom is already the final answer,
+ * so no rule downstream ever adds or subtracts an inset again.
+ */
+export function computeGeometry(frame: Frame, insets: Insets, viewportTop: number, viewportHeight: number): Record<string, number> {
+  const screen = Math.max(frame.height, viewportTop + viewportHeight);
+  // The last row of pixels the browser is actually showing us: top of the keyboard, top of Safari's
+  // toolbar, or the bottom of the screen — whichever comes first.
+  const shown = Math.min(screen, viewportTop + viewportHeight);
+  // The last row content may sit on without the home indicator crossing it.
+  const clear = screen - insets.bottom;
+  return {
+    "--inset-top": insets.top,
+    "--inset-right": insets.right,
+    "--inset-bottom": insets.bottom,
+    "--inset-left": insets.left,
+    // measured from the bottom of the shell, which is the bottom of the screen
+    "--safe-bottom": Math.max(0, screen - Math.min(shown, clear)),
+    "--safe-top": Math.max(0, insets.top - viewportTop),
+    "--safe-left": insets.left,
+    "--safe-right": insets.right,
+    "--app-height": viewportHeight,
+    "--shell-height": Math.max(0, screen - viewportTop),
+    "--viewport-top": viewportTop,
+    // whatever the browser took off the bottom on top of the safe area — the keyboard, in practice
+    "--keyboard-inset": Math.max(0, screen - shown - insets.bottom),
+  };
+}
+
+function update(): void {
   const style = document.documentElement.style;
   const native = readNativeInsets();
   if (native) applyNativeInsets(native);
-  const env = measureEnvInsets();
-  const insets = native ?? env;
-  const edges = ownsScreenEdges();
-  style.setProperty("--inset-top", `${insets.top}px`);
-  style.setProperty("--inset-right", `${insets.right}px`);
-  style.setProperty("--inset-left", `${insets.left}px`);
-  // In a plain browser tab the toolbar already sits over the home indicator; padding for it again
-  // leaves a dead band under the composer.
-  style.setProperty("--inset-bottom", `${edges ? insets.bottom : 0}px`);
-}
-
-function updateVisibleViewport(): void {
-  const style = document.documentElement.style;
+  const frame = measureFrame();
   const vv = window.visualViewport;
-  const height = Math.round(vv?.height ?? window.innerHeight);
-  const offsetTop = Math.round(vv?.offsetTop ?? 0);
-  // Whatever the on-screen keyboard is covering. The keyboard hides the home indicator too, so the
-  // bottom safe-area inset has to stand down while it is up.
-  const keyboard = Math.max(0, Math.round(window.innerHeight - height - offsetTop));
-  style.setProperty("--app-height", `${height}px`);
-  style.setProperty("--viewport-top", `${offsetTop}px`);
-  style.setProperty("--keyboard-inset", `${keyboard}px`);
+  const geometry = computeGeometry(
+    frame,
+    native ?? frame.insets,
+    Math.max(0, Math.round(vv?.offsetTop ?? 0)),
+    Math.round(vv?.height ?? frame.height),
+  );
+  for (const [name, value] of Object.entries(geometry)) style.setProperty(name, `${value}px`);
 }
 
 export function installPlatformGeometry(): () => void {
   applyNativeInsets(readNativeInsets() ?? ZERO_INSETS);
-  updateInsets();
-  updateVisibleViewport();
-  const onViewport = (): void => { updateVisibleViewport(); updateInsets(); };
-  window.addEventListener("resize", onViewport);
-  window.addEventListener("orientationchange", onViewport);
-  window.visualViewport?.addEventListener("resize", updateVisibleViewport);
-  window.visualViewport?.addEventListener("scroll", updateVisibleViewport);
-  const onNativeInsets = () => { const insets = readNativeInsets(); if (insets) { applyNativeInsets(insets); updateInsets(); } };
+  update();
+  window.addEventListener("resize", update);
+  window.addEventListener("orientationchange", update);
+  window.visualViewport?.addEventListener("resize", update);
+  window.visualViewport?.addEventListener("scroll", update);
+  const onNativeInsets = () => update();
   window.addEventListener("native-insets-changed", onNativeInsets);
   return () => {
-    window.removeEventListener("resize", onViewport);
-    window.removeEventListener("orientationchange", onViewport);
-    window.visualViewport?.removeEventListener("resize", updateVisibleViewport);
-    window.visualViewport?.removeEventListener("scroll", updateVisibleViewport);
+    window.removeEventListener("resize", update);
+    window.removeEventListener("orientationchange", update);
+    window.visualViewport?.removeEventListener("resize", update);
+    window.visualViewport?.removeEventListener("scroll", update);
     window.removeEventListener("native-insets-changed", onNativeInsets);
   };
 }
