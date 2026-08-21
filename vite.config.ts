@@ -23,15 +23,29 @@ export default defineConfig({
         scope: "/",
         display: "standalone",
         display_override: ["standalone", "minimal-ui"],
-        background_color: "#f7f4ef",
-        theme_color: "#171717",
+        background_color: "#faf3e8",
+        theme_color: "#faf3e8",
         orientation: "portrait-primary",
         categories: ["social", "communication"],
         icons: [
           { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
           { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
           { src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" }
-        ]
+        ],
+        shortcuts: [
+          { name: "New doodle", short_name: "Doodle", description: "Draw something for your family", url: "/?compose=doodle", icons: [{ src: "/icons/icon-192.png", sizes: "192x192" }] }
+        ],
+        share_target: {
+          action: "/share-target",
+          method: "POST",
+          enctype: "multipart/form-data",
+          params: {
+            title: "title",
+            text: "text",
+            url: "url",
+            files: [{ name: "media", accept: ["image/*", "video/*", "audio/*"] }]
+          }
+        }
       }
     })
   ],
@@ -43,7 +57,7 @@ export default defineConfig({
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
     proxy: {
-      "/api": { target: "http://127.0.0.1:8787", changeOrigin: true },
+      "/api": { target: "http://127.0.0.1:8787", changeOrigin: true, ws: true },
       "/ws": { target: "ws://127.0.0.1:8787", ws: true }
     }
   }

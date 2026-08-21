@@ -5,12 +5,16 @@ A tiny, private family messenger built from `c0di-org/Tauri-vibe-template`: Reac
 ## What works
 
 - Family group chat plus one-to-one chats between any two members.
-- Pairing by short code or QR link; no accounts or passwords.
+- Pairing by short code or QR link; no accounts or passwords. Invites can be shared via the native share sheet.
 - Client-side encrypted text and encrypted file attachments.
+- Inline media: photos and videos render in the chat (with tiny encrypted blurred previews), voice notes get a player, everything else a file card. Decrypted media is cached locally in IndexedDB so it outlives the 7-day relay window.
+- A crayon doodle pad for kids: draw and send, straight from the composer or the PWA app shortcut.
+- Tap-and-hold emoji reactions (delivered as encrypted events), giant emoji messages, confetti on celebrations, playful sounds and haptics.
+- Realtime everywhere: one WebSocket per conversation, so previews, unread counts (mirrored to the app badge), typing indicators, and read receipts (✓ / ✓✓) all update live.
 - Signed message envelopes so the relay cannot silently impersonate a family member.
 - Cloudflare Durable Objects for realtime rooms, WebSocket hibernation, short-lived message relay, and pairing sessions.
 - R2 for encrypted attachments with a seven-day lifecycle rule.
-- PWA manifest, app icons, offline app shell, install flow, unread badges, and Web Push (works from the installed app, including iOS Home Screen).
+- PWA pushed hard: manifest, icons, offline app shell, install flow, app badge, Web Push (works from the installed app, including iOS Home Screen), app shortcuts, and a Web Share Target so photos can be shared into Kin from any app.
 - Same frontend can still be packaged by Tauri for Android, iOS, macOS, Windows, and Linux later.
 
 ## Architecture

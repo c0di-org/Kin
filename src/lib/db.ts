@@ -1,7 +1,7 @@
 import type { ChatMessage, Conversation, LocalIdentity } from "./types";
 
 const DB_NAME = "kin-v1";
-const VERSION = 1;
+const VERSION = 2;
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -14,11 +14,14 @@ function openDb(): Promise<IDBDatabase> {
         const store = db.createObjectStore("messages", { keyPath: "id" });
         store.createIndex("conversation", ["conversationId", "createdAt"]);
       }
+      if (!db.objectStoreNames.contains("blobs")) db.createObjectStore("blobs", { keyPath: "fileId" });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
+
+export type StoredBlob = { fileId: string; mime: string; name: string; bytes: ArrayBuffer; createdAt: number };
 
 function request<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -52,6 +55,20 @@ export async function listMessages(conversationId: string, limit = 400): Promise
   const range = IDBKeyRange.bound([conversationId, 0], [conversationId, Number.MAX_SAFE_INTEGER]);
   const rows = await request(idx.getAll(range)) as ChatMessage[];
   return rows.slice(-limit);
+}
+export async function getMessage(id: string): Promise<ChatMessage | null> {
+  const db = await openDb(); const tx = db.transaction("messages", "readonly");
+  return (await request(tx.objectStore("messages").get(id))) ?? null;
+}
+export async function deleteMessage(id: string): Promise<void> {
+  const db = await openDb(); const tx = db.transaction("messages", "readwrite"); tx.objectStore("messages").delete(id);
+}
+export async function putBlob(record: StoredBlob): Promise<void> {
+  const db = await openDb(); const tx = db.transaction("blobs", "readwrite"); tx.objectStore("blobs").put(record);
+}
+export async function getBlob(fileId: string): Promise<StoredBlob | null> {
+  const db = await openDb(); const tx = db.transaction("blobs", "readonly");
+  return (await request(tx.objectStore("blobs").get(fileId))) ?? null;
 }
 export async function clearAll(): Promise<void> {
   indexedDB.deleteDatabase(DB_NAME);

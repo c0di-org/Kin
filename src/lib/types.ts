@@ -20,6 +20,8 @@ export type Conversation = {
   createdAt: number;
   lastMessageAt?: number;
   lastPreview?: string;
+  lastPreviewSender?: string;
+  lastReadAt?: number;
   unread?: number;
 };
 
@@ -31,6 +33,10 @@ export type AttachmentPayload = {
   iv: string;
   key: string;
   sha256: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  thumb?: string;
 };
 
 export type ChatPayload = {
