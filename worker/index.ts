@@ -373,9 +373,13 @@ export class ConversationRoom extends DurableObject<Env> {
   }
 
   private async listHistory(): Promise<Response> {
-    const rows = await this.ctx.storage.list<Envelope>({ prefix: "msg:", limit: 400 });
+    // Keys are msg:<zero-padded createdAt>:<id> and DO list is ascending, so an unqualified
+    // limit hands back the *oldest* 400 — past 400 live envelopes a reconnecting client would
+    // replay ancient history and never see anything recent. Take the newest, then put them back
+    // in order, because clients ingest oldest-first.
+    const rows = await this.ctx.storage.list<Envelope>({ prefix: "msg:", limit: 400, reverse: true });
     const now = Date.now();
-    return json([...rows.values()].filter(x => x.expiresAt > now));
+    return json([...rows.values()].filter(x => x.expiresAt > now).sort((a, b) => a.createdAt - b.createdAt));
   }
 
   private async postMessage(request: Request, meta: RoomMeta): Promise<Response> {
