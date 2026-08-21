@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import Aurora from "./Aurora";
 
-const CRAYONS = ["#2b2622", "#e94f4f", "#f6903d", "#f7c948", "#4cb944", "#3d9be9", "#7b5be9", "#e858a8"];
+const CRAYONS = ["#241f3d", "#ff5b7f", "#ff9d4d", "#ffd645", "#3fe0b0", "#45c2ff", "#8a7bff", "#ff77bd"];
 const SIZES = [5, 11, 22];
-const PAPER = "#fffdf6";
+const PAPER = "#ffffff";
 
 export default function Doodle({ onSend, onClose }: { onSend(blob: Blob): void; onClose(): void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -90,6 +91,7 @@ export default function Doodle({ onSend, onClose }: { onSend(blob: Blob): void; 
   };
 
   return <div className="doodle">
+    <Aurora/>
     <header className="doodle-bar">
       <button className="round" onClick={onClose} aria-label="Close">✕</button>
       <strong>Doodle 🖍️</strong>

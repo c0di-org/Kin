@@ -8,6 +8,7 @@ import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conve
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
 import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
 import { confetti, emojiBurst, isCelebration } from "./lib/effects";
+import Aurora from "./components/Aurora";
 import Doodle from "./components/Doodle";
 import Onboarding from "./components/Onboarding";
 import { FileContent, ImageContent, Lightbox, useAttachmentUrl, VideoContent, VoiceContent } from "./components/Media";
@@ -552,10 +553,11 @@ export default function App() {
   const typingNames = typing.map(d => active?.members.find(m => m.deviceId === d)?.displayName).filter(Boolean).map(n => firstName(n!));
   const showIosInstall = isAppleTouchDevice() && !isStandalone();
 
-  if (!ready) return <div className="splash"><Mark/></div>;
+  if (!ready) return <div className="splash"><Aurora/><Mark/></div>;
   if (!identity) return <Onboarding pairCode={joinCode} create={createFamily} join={(n, a, c) => joinFamily(n, a, c)}/>;
 
   return <div className="app">
+    <Aurora/>
     {!online && <div className="offline-bar">📡 You’re offline — messages will send when you’re back</div>}
     <aside className={`sidebar ${active ? "has-active" : ""}`}>
       <header>

@@ -1,7 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="120" fill="#171717"/>
-  <circle cx="172" cy="204" r="62" fill="#F7F4EF"/>
-  <circle cx="340" cy="204" r="62" fill="#F7F4EF"/>
-  <circle cx="256" cy="336" r="62" fill="#F7F4EF"/>
-  <path d="M210 234l46 70 46-70M222 204h68" fill="none" stroke="#F7F4EF" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="candy" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#45c2ff"/>
+      <stop offset="0.5" stop-color="#8a7bff"/>
+      <stop offset="1" stop-color="#ff77bd"/>
+    </linearGradient>
+    <radialGradient id="bead" cx="0.34" cy="0.3" r="0.85">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef0fb"/>
+    </radialGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#2b1a5e" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="url(#candy)"/>
+  <g filter="url(#soft)">
+    <circle cx="170" cy="190" r="78" fill="url(#bead)"/>
+    <circle cx="342" cy="190" r="78" fill="url(#bead)"/>
+    <circle cx="256" cy="340" r="78" fill="url(#bead)"/>
+  </g>
 </svg>
