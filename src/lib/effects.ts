@@ -1,6 +1,6 @@
 const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-const CONFETTI = ["#ff5288", "#ff9838", "#f7c948", "#4cb944", "#3d9be9", "#7b5be9", "#ff6b5e"];
+const CONFETTI = ["#45c2ff", "#8a7bff", "#ff77bd", "#ff9d4d", "#ffd645", "#3fe0b0", "#ff5b7f"];
 
 export function isCelebration(text: string): boolean {
   return /[🎉🥳🎂🎈🎊🏆⭐🌟]|happy birthday|congrat|hooray|hurra|yay/iu.test(text);

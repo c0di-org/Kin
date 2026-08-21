@@ -23,8 +23,8 @@ export default defineConfig({
         scope: "/",
         display: "standalone",
         display_override: ["standalone", "minimal-ui"],
-        background_color: "#faf3e8",
-        theme_color: "#faf3e8",
+        background_color: "#e7edff",
+        theme_color: "#e7edff",
         orientation: "portrait-primary",
         categories: ["social", "communication"],
         icons: [

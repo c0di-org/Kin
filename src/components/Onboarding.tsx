@@ -1,4 +1,5 @@
 import { useState } from "react";
+import Aurora from "./Aurora";
 
 export const ANIMALS = ["🦊", "🐻", "🐰", "🐸", "🦁", "🐼", "🐨", "🦄", "🐯", "🐙", "🦉", "🐢", "🐬", "🦋", "🐞", "🦕"];
 const FLOATERS = ["🎈", "⭐", "🦋", "🌈", "🎨", "🧸", "🌻", "🪁", "💌", "🍓"];
@@ -24,6 +25,7 @@ export default function Onboarding({ pairCode, create, join }: {
   };
 
   return <div className="onboarding">
+    <Aurora/>
     <div className="floaters" aria-hidden>
       {FLOATERS.map((f, i) => <span key={i} style={{ left: `${(i * 97) % 100}%`, animationDelay: `${i * 1.7}s`, animationDuration: `${14 + (i % 5) * 3}s` }}>{f}</span>)}
     </div>
