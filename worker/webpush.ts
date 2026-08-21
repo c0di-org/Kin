@@ -1,4 +1,5 @@
 /** RFC 8291 / RFC 8292 Web Push sender using Web Crypto + fetch (Workers-safe). */
+import { deriveEcdhBits, exportRaw, generateKeyPair } from "./webcrypto";
 
 export type PushSubscriptionJSON = {
   endpoint: string;
@@ -88,12 +89,12 @@ export async function encryptPushPayload(userPublicKey: Uint8Array, userAuth: Ui
   const sender = overrides.senderPrivate && overrides.senderPublic
     ? { publicKey: overrides.senderPublic, privateKey: await importEcdhPrivate(overrides.senderPublic, overrides.senderPrivate) }
     : await (async () => {
-      const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-      return { publicKey: new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey)), privateKey: pair.privateKey };
+      const pair = await generateKeyPair({ name: "ECDH", namedCurve: "P-256" }, ["deriveBits"]);
+      return { publicKey: new Uint8Array(await exportRaw(pair.publicKey)), privateKey: pair.privateKey };
     })();
 
   const uaPublic = await crypto.subtle.importKey("raw", asBuf(userPublicKey), { name: "ECDH", namedCurve: "P-256" }, false, []);
-  const ecdhSecret = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: uaPublic }, sender.privateKey, 256));
+  const ecdhSecret = new Uint8Array(await deriveEcdhBits(uaPublic, sender.privateKey, 256));
   const keyInfo = concat(encoder.encode("WebPush: info"), new Uint8Array([0]), userPublicKey, sender.publicKey);
   const ikm = await hkdf(ecdhSecret, userAuth, keyInfo, 32);
   const salt = overrides.salt ?? crypto.getRandomValues(new Uint8Array(16));

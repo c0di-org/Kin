@@ -2,6 +2,7 @@
  * Test-only doubles for the Durable Object runtime: enough of `ctx.storage`, R2 and the
  * WebCrypto request-signing the client does to drive `ConversationRoom` from plain vitest.
  */
+import { exportJwk, generateKeyPair } from "../webcrypto";
 
 type Row = { key: string; value: unknown };
 
@@ -119,14 +120,14 @@ export type TestIdentity = {
 };
 
 export async function makeIdentity(displayName: string): Promise<TestIdentity> {
-  const dh = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const sign = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const dh = await generateKeyPair({ name: "ECDH", namedCurve: "P-256" }, ["deriveBits"]);
+  const sign = await generateKeyPair({ name: "ECDSA", namedCurve: "P-256" }, ["sign", "verify"]);
   const id: TestIdentity = {
     deviceId: crypto.randomUUID(),
     displayName,
     avatarSeed: `e:${displayName[0]}`,
-    dhPublicJwk: await crypto.subtle.exportKey("jwk", dh.publicKey),
-    signPublicJwk: await crypto.subtle.exportKey("jwk", sign.publicKey),
+    dhPublicJwk: await exportJwk(dh.publicKey),
+    signPublicJwk: await exportJwk(sign.publicKey),
     signPrivate: sign.privateKey,
     member() {
       return {

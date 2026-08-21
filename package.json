@@ -8,14 +8,15 @@
     "dev": "vite",
     "dev:relay": "wrangler dev",
     "prebuild": "node scripts/materialize-icons.mjs",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.worker.json && vite build",
     "preview": "vite preview",
     "test": "vitest run --passWithNoTests",
     "icons": "tauri icon assets/app-icon.svg",
     "pretauri": "npm run icons",
     "tauri": "tauri",
     "deploy": "npm run build && wrangler deploy",
-    "cf:types": "wrangler types"
+    "cf:types": "wrangler types",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.worker.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
