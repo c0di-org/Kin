@@ -818,3 +818,19 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   *, ::before, ::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
   .aurora i { animation: none; }
 }
+
+/* A render throw used to leave a white screen with no way back but force-quitting. */
+.crash {
+  position: fixed; inset: 0; z-index: 999; display: grid; align-content: center; justify-items: center;
+  gap: 12px; padding: 32px; text-align: center; color: var(--ink); background: var(--bg);
+}
+.crash > b { font-size: 62px; }
+.crash strong { font-size: 22px; font-weight: 1000; }
+.crash small { color: var(--sub); font-weight: 600; max-width: 320px; line-height: 1.5; }
+.crash-retry {
+  margin-top: 8px; padding: 14px 28px; border-radius: 999px; font-size: 16px; font-weight: 800;
+  color: #fff; background: var(--grad); box-shadow: var(--gloss);
+}
+.crash details { margin-top: 10px; max-width: 320px; color: var(--sub); font-size: 13px; }
+.crash summary { cursor: pointer; font-weight: 700; }
+.crash pre { margin-top: 8px; white-space: pre-wrap; word-break: break-word; text-align: left; font-size: 12px; opacity: .8; }

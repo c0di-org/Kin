@@ -1,5 +1,5 @@
 import type { AttachmentPayload, Conversation, LocalIdentity } from "./types";
-import { decryptFile } from "./crypto";
+import { decryptFile, sha256 } from "./crypto";
 import { downloadEncryptedFile } from "./relay";
 import { getBlob, putBlob } from "./db";
 
@@ -75,6 +75,12 @@ export function resolveAttachment(identity: LocalIdentity, conversation: Convers
       let stored = await getBlob(att.fileId);
       if (!stored) {
         const cipher = await downloadEncryptedFile(identity, conversation.id, att.fileId);
+        // The digest travels inside the encrypted payload, so only the conversation can check it.
+        // AES-GCM would catch altered bytes anyway, but as an indistinguishable "cannot decrypt";
+        // checking first tells a truncated download apart from a key we do not hold.
+        if (att.sha256 && (await sha256(cipher)) !== att.sha256) {
+          throw new Error(`attachment ${att.fileId} failed its checksum — the download is corrupt`);
+        }
         const clear = await decryptFile(cipher, att.key, att.iv);
         stored = { fileId: att.fileId, mime: att.mime, name: att.name, bytes: clear, createdAt: Date.now() };
         await putBlob(stored);
@@ -82,7 +88,10 @@ export function resolveAttachment(identity: LocalIdentity, conversation: Convers
       const url = URL.createObjectURL(new Blob([stored.bytes], { type: stored.mime }));
       urls.set(att.fileId, url);
       return url;
-    } catch { return null; } finally { pending.delete(att.fileId); }
+    } catch (err) {
+      console.error("kin-attachment-failed", att.fileId, err);
+      return null;
+    } finally { pending.delete(att.fileId); }
   })();
   pending.set(att.fileId, job);
   return job;

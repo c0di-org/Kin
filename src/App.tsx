@@ -75,10 +75,12 @@ export default function App() {
   const sockets = useRef(new Map<string, WebSocket>());
   const wanted = useRef(new Set<string>());
   const connecting = useRef(new Set<string>());
-  const identityRef = useRef<LocalIdentity | null>(null);
-  const activeIdRef = useRef<string | null>(null);
+  const retries = useRef(new Map<string, number>());
+  const retryTimers = useRef(new Map<string, number>());
+  const identityRef = useRef<LocalIdentity | null>(identity);
+  const activeIdRef = useRef<string | null>(activeId);
   const recCancelled = useRef(false);
-  const pushStatusRef = useRef<PushStatus>("off");
+  const pushStatusRef = useRef<PushStatus>(pushStatus);
   const directCache = useRef(new Map<string, { id: string; key: string }>());
   const probedAt = useRef(new Map<string, number>());
   const sweeping = useRef(false);
@@ -89,9 +91,14 @@ export default function App() {
   const composer = useRef<HTMLTextAreaElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
 
-  identityRef.current = identity;
-  activeIdRef.current = activeId;
-  pushStatusRef.current = pushStatus;
+  // These mirror state for the async callbacks — sockets, timers, service-worker messages — that
+  // outlive the render that created them. Writing them during render is benign today but is a
+  // landmine under concurrent React, which may render without committing. The initial values above
+  // cover the first render; these keep them current after every commit.
+  useEffect(() => { identityRef.current = identity; }, [identity]);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  useEffect(() => { pushStatusRef.current = pushStatus; }, [pushStatus]);
+
   const active = conversations.find(c => c.id === activeId) ?? null;
   const activeMessages = messages[activeId ?? ""] ?? [];
 
@@ -189,9 +196,29 @@ export default function App() {
 
   useEffect(() => () => {
     wanted.current.clear();
+    retryTimers.current.forEach(clearTimeout);
+    retryTimers.current.clear();
     sockets.current.forEach(s => s.close());
     sockets.current.clear();
   }, []);
+
+  /**
+   * A flat retry means every room in the family reconnects in lockstep after a blip, and keeps
+   * hammering at the same interval if the relay is actually down. Back off, and spread the
+   * attempts out so we are not a synchronised thundering herd of one device.
+   */
+  function scheduleReconnect(convId: string): void {
+    if (!wanted.current.has(convId)) return;
+    const attempt = retries.current.get(convId) ?? 0;
+    retries.current.set(convId, attempt + 1);
+    const ceiling = Math.min(1000 * 2 ** Math.min(attempt, 6), 60_000);
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2);
+    clearTimeout(retryTimers.current.get(convId));
+    retryTimers.current.set(convId, setTimeout(() => {
+      retryTimers.current.delete(convId);
+      void connect(convId);
+    }, delay) as unknown as number);
+  }
 
   async function connect(convId: string): Promise<void> {
     const id = identityRef.current;
@@ -209,15 +236,16 @@ export default function App() {
         } catch { /* offline */ }
       }
       const socket = new WebSocket(await websocketUrl(id, convId));
+      socket.onopen = () => { retries.current.delete(convId); };
       socket.onmessage = ev => { void handleFrame(convId, String(ev.data)); };
       socket.onclose = () => {
         sockets.current.delete(convId);
-        if (wanted.current.has(convId)) setTimeout(() => void connect(convId), 4000);
+        scheduleReconnect(convId);
       };
       sockets.current.set(convId, socket);
       if (!wanted.current.has(convId)) socket.close();
     } catch {
-      if (wanted.current.has(convId)) setTimeout(() => void connect(convId), 6000);
+      scheduleReconnect(convId);
     } finally { connecting.current.delete(convId); }
   }
 
@@ -424,7 +452,7 @@ export default function App() {
       }
     } finally { sweeping.current = false; }
   }
-  discoverRef.current = () => void discoverDirectChats(true);
+  useEffect(() => { discoverRef.current = () => void discoverDirectChats(true); });
 
   useEffect(() => {
     if (!ready || !identity) return;
