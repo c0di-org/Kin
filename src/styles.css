@@ -56,15 +56,23 @@
 
   color: var(--ink);
   background: var(--bg);
-  --safe-top: max(env(safe-area-inset-top), var(--native-inset-top, 0px));
-  --safe-bottom: max(env(safe-area-inset-bottom), var(--native-inset-bottom, 0px));
-  --safe-left: max(env(safe-area-inset-left), var(--native-inset-left, 0px));
-  --safe-right: max(env(safe-area-inset-right), var(--native-inset-right, 0px));
+  /* --inset-*, --app-height, --viewport-top and --keyboard-inset are kept live by lib/platformGeometry.ts */
+  --inset-top: env(safe-area-inset-top);
+  --inset-bottom: env(safe-area-inset-bottom);
+  --inset-left: env(safe-area-inset-left);
+  --inset-right: env(safe-area-inset-right);
+  --keyboard-inset: 0px;
+  --viewport-top: 0px;
+  --safe-top: var(--inset-top);
+  /* the keyboard covers the home indicator, so stop reserving room for it while it is up */
+  --safe-bottom: max(0px, calc(var(--inset-bottom) - var(--keyboard-inset)));
+  --safe-left: var(--inset-left);
+  --safe-right: var(--inset-right);
   --app-height: 100dvh;
 }
 
 * { box-sizing: border-box; }
-html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
 body { background: var(--bg); }
 button, input, textarea { font: inherit; color: inherit; }
 button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -93,12 +101,13 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 /* ---------- layout ---------- */
 .app {
+  position: fixed;
+  top: var(--viewport-top); left: 0; right: 0;
   height: var(--app-height);
   display: grid;
   grid-template-columns: minmax(300px, 392px) 1fr;
   gap: 12px;
   padding: 12px;
-  position: relative;
   isolation: isolate;
 }
 .sidebar, .chat { position: relative; z-index: 1; border-radius: 34px; box-shadow: var(--shadow); overflow: hidden; }
@@ -177,6 +186,56 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .new-chat:hover { transform: translateY(-2px) scale(1.06) rotate(90deg); }
 .new-chat:active { transform: scale(.94); box-shadow: var(--glow); }
 
+/* ---------- family cards (one or two chats deserve more than a list row) ---------- */
+.conversation-list.as-cards { display: grid; gap: 14px; padding: 6px 4px 110px; align-content: start; }
+.family-card {
+  border-radius: 30px; padding: 6px; display: grid; gap: 2px;
+  background: var(--glass-strong); border: 1px solid var(--glass-line);
+  box-shadow: var(--shadow), var(--gloss);
+  transition: transform .18s cubic-bezier(.3, 1.4, .5, 1), box-shadow .18s, border-color .18s;
+}
+.family-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-big), var(--gloss); }
+.family-card.active { border-color: rgba(124, 108, 255, .5); box-shadow: var(--glow), var(--gloss); }
+.family-card.buzzing { border-color: rgba(255, 119, 189, .55); }
+.family-open {
+  width: 100%; display: grid; grid-template-columns: 116px minmax(0, 1fr) auto; align-items: center;
+  gap: 8px; text-align: left; padding: 10px 12px 10px 0; border-radius: 26px;
+}
+.family-head { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.family-head strong { font-size: 20px; font-weight: 1000; letter-spacing: -.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.family-head small { font-size: 13px; color: var(--sub); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ring { position: relative; width: 116px; height: 116px; display: block; flex: none; }
+.ring > i {
+  position: absolute; left: 50%; top: 50%; display: block;
+  animation: pop-in .4s cubic-bezier(.3, 1.7, .5, 1);
+}
+.ring-core {
+  position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -23px;
+  border-radius: 50%; display: grid; place-items: center; font-size: 22px; font-style: normal;
+  background: var(--grad-soft); border: 1px solid var(--glass-line); box-shadow: var(--gloss);
+}
+.ring.solo .ring-core {
+  left: auto; right: 12px; top: auto; bottom: 12px; margin: 0;
+  width: 34px; height: 34px; font-size: 17px;
+  background: var(--glass-strong); box-shadow: var(--shadow), var(--gloss);
+}
+.family-recent {
+  width: 100%; display: grid; gap: 3px; text-align: left; padding: 10px 14px 12px;
+  border-radius: 24px; background: rgba(255, 255, 255, .38); border: 1px solid var(--glass-line);
+}
+.family-line { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: baseline; font-size: 13.5px; }
+.family-line b { font-weight: 900; }
+.family-line em { font-style: normal; color: var(--sub); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.family-line time { font-size: 11.5px; color: var(--sub); font-weight: 700; }
+.family-invite {
+  margin: 2px 6px 6px; padding: 13px; border-radius: 22px; background: var(--grad); color: #fff;
+  font-weight: 900; font-size: 15px; box-shadow: var(--glow), var(--plastic);
+  transition: transform .16s cubic-bezier(.3, 1.5, .5, 1);
+}
+.family-invite:active { transform: scale(.97); }
+.family-empty { display: block; padding: 4px 16px 12px; color: var(--sub); font-weight: 700; font-size: 13.5px; }
+
 /* ---------- avatars ---------- */
 .avatar {
   display: inline-grid; flex: none; place-items: center; border-radius: 50%;
@@ -203,10 +262,21 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .chat-person > span:not(.stack) { display: flex; flex-direction: column; min-width: 0; }
 .chat-person strong { font-size: 17.5px; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-person small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.back { display: none; font-size: 34px; width: 44px; height: 44px; line-height: 1; color: var(--accent); }
+.back {
+  display: none; flex: none; width: 46px; height: 46px; border-radius: 50%; color: var(--accent);
+  place-items: center; margin-left: 2px;
+  background: var(--glass-strong); border: 1px solid var(--glass-line); box-shadow: var(--shadow);
+  transition: transform .16s cubic-bezier(.3, 1.5, .5, 1), background .16s;
+}
+.back:active { transform: scale(.92); }
+/* line icons: sized here so the glyph fills the button instead of floating in it */
+.back svg, .doodle-close svg {
+  width: 24px; height: 24px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.75; stroke-linecap: round; stroke-linejoin: round;
+}
 
 .messages {
-  flex: 1; overflow: auto; overscroll-behavior: contain;
+  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain;
   padding: 22px max(16px, var(--safe-right)) 14px max(16px, var(--safe-left));
   display: flex; flex-direction: column; gap: 3px; scrollbar-width: thin;
   scrollbar-color: rgba(124, 108, 255, .28) transparent;
@@ -392,14 +462,21 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 /* ---------- doodle ---------- */
 .doodle {
-  position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column;
+  position: fixed; top: var(--viewport-top); left: 0; right: 0; height: var(--app-height);
+  z-index: 40; display: flex; flex-direction: column;
   background: var(--bg); animation: sheet-up .28s cubic-bezier(.25, 1.2, .5, 1);
 }
 .doodle-bar {
   flex: none; display: flex; align-items: center; justify-content: space-between;
   padding: calc(var(--safe-top) + 10px) 16px 8px; font-size: 20px; font-weight: 900; z-index: 1;
 }
-.doodle-bar-actions { display: flex; gap: 4px; }
+.doodle-bar-actions { display: flex; gap: 8px; }
+.doodle-bar .round {
+  width: 52px; height: 52px; font-size: 23px;
+  background: var(--glass-strong); border: 1px solid var(--glass-line); box-shadow: var(--shadow);
+}
+.doodle-bar .round:disabled { opacity: .4; }
+.doodle-close { color: var(--ink); }
 .doodle-canvas {
   flex: 1; min-height: 0; margin: 0 12px; border-radius: 28px; touch-action: none; cursor: crosshair;
   background: #fff; box-shadow: var(--shadow-big), var(--gloss); border: 1px solid var(--glass-line); z-index: 1;
@@ -423,12 +500,13 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 /* ---------- sheets & panels ---------- */
 .scrim {
-  position: fixed; inset: 0; background: rgba(30, 25, 70, .34);
+  position: fixed; top: var(--viewport-top); left: 0; right: 0; height: var(--app-height);
+  background: rgba(30, 25, 70, .34);
   -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
   display: flex; align-items: flex-end; justify-content: center; z-index: 20; animation: fade-in .2s;
 }
 .sheet {
-  width: min(100%, 540px); max-height: 86dvh; overflow: auto;
+  width: min(100%, 540px); max-height: calc(var(--app-height) - 24px); overflow: auto;
   background: var(--glass-strong); border-radius: 36px 36px 0 0;
   padding: 12px 24px calc(28px + var(--safe-bottom));
   box-shadow: var(--shadow-big), var(--gloss); animation: sheet-up .34s cubic-bezier(.25, 1.3, .5, 1);
@@ -488,8 +566,20 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .paired strong { font-size: 22px; font-weight: 1000; }
 .paired > div { font-size: 36px; letter-spacing: .14em; }
 .paired small { color: var(--sub); font-weight: 600; max-width: 300px; line-height: 1.5; }
-.profile { display: flex; align-items: center; gap: 16px; padding: 6px 0 18px; }
-.profile span { display: flex; flex-direction: column; }
+.profile { width: 100%; display: flex; align-items: center; gap: 16px; padding: 6px 8px 18px; text-align: left; border-radius: 22px; transition: background .16s; }
+.profile:hover { background: rgba(255, 255, 255, .5); }
+.profile span { display: flex; flex-direction: column; min-width: 0; }
+.profile-edit { margin-left: auto; font-size: 19px; font-weight: 400; }
+.profile-preview { display: grid; place-items: center; margin-bottom: 6px; }
+.profile-preview .brand-blob { margin-bottom: 0; }
+.name-input {
+  width: 100%; height: 58px; padding: 0 20px; border: 1px solid var(--glass-line); border-radius: 20px;
+  background: rgba(255, 255, 255, .62); outline: none; font-size: 16.5px; font-weight: 700;
+  margin-top: 8px; transition: border-color .18s, background .18s;
+}
+.name-input:focus { border-color: rgba(124, 108, 255, .55); background: rgba(255, 255, 255, .85); }
+.profile-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.profile-actions .primary { min-width: 140px; }
 .profile strong { font-size: 21px; font-weight: 1000; }
 .profile small { color: var(--sub); font-weight: 600; font-size: 13px; }
 .setting { width: 100%; display: flex; align-items: center; gap: 14px; text-align: left; padding: 16px 8px; border-top: 1px solid var(--line); font-weight: 700; font-size: 16px; border-radius: 18px; transition: background .16s; }
@@ -532,7 +622,8 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 /* ---------- lightbox ---------- */
 .lightbox {
-  position: fixed; inset: 0; z-index: 45; background: rgba(18, 14, 42, .78);
+  position: fixed; top: var(--viewport-top); left: 0; right: 0; height: var(--app-height);
+  z-index: 45; background: rgba(18, 14, 42, .78);
   -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
   display: grid; place-items: center; animation: fade-in .22s;
 }
@@ -542,7 +633,8 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 /* ---------- onboarding ---------- */
 .onboarding {
-  height: var(--app-height); overflow: auto; position: relative; isolation: isolate;
+  position: fixed; top: var(--viewport-top); left: 0; right: 0;
+  height: var(--app-height); overflow: auto; isolation: isolate;
   padding: calc(var(--safe-top) + 22px) max(22px, var(--safe-right)) calc(var(--safe-bottom) + 22px) max(22px, var(--safe-left));
   display: grid; place-items: center; background: var(--bg);
 }
@@ -607,7 +699,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   .sidebar.has-active { display: none; }
   .chat { display: none; }
   .chat.open { display: flex; }
-  .back { display: block; }
+  .back { display: grid; }
   .bubble-wrap { max-width: 84%; }
   .img-frame, .video-frame, span.img-gone { width: min(66vw, 300px); }
   .react-hint { display: none; }
@@ -618,7 +710,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   .sidebar > header { padding: 0 12px; }
   /* a bottom sheet is a phone idiom; on a wide screen float the card instead */
   .scrim { align-items: center; padding: 24px; }
-  .sheet { border-radius: 36px; max-height: min(80dvh, 760px); padding-bottom: 28px; }
+  .sheet { border-radius: 36px; max-height: min(calc(var(--app-height) - 48px), 760px); padding-bottom: 28px; }
   .grab { display: none; }
   .sheet h2 { margin-top: 10px; }
 }
@@ -652,6 +744,10 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
   .avatar { color: #f2f0ff; border-color: rgba(255, 255, 255, .2); box-shadow: inset 0 3px 6px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .4); }
   .conversation:hover { background: rgba(255, 255, 255, .06); }
+  .family-recent { background: rgba(255, 255, 255, .05); }
+  .profile:hover { background: rgba(255, 255, 255, .06); }
+  .name-input { background: rgba(255, 255, 255, .08); }
+  .name-input:focus { background: rgba(255, 255, 255, .14); }
   .chat-person:hover, .member:hover:not(:disabled), .setting:hover { background: rgba(255, 255, 255, .06); }
   .chat-head { background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, 0)); }
   .bubble { background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .14); }

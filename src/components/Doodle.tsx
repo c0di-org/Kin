@@ -93,7 +93,9 @@ export default function Doodle({ onSend, onClose }: { onSend(blob: Blob): void; 
   return <div className="doodle">
     <Aurora/>
     <header className="doodle-bar">
-      <button className="round" onClick={onClose} aria-label="Close">✕</button>
+      <button className="round doodle-close" onClick={onClose} aria-label="Close doodle">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg>
+      </button>
       <strong>Doodle 🖍️</strong>
       <div className="doodle-bar-actions">
         <button className="round" onClick={undo} disabled={!canUndo} aria-label="Undo">↩︎</button>
