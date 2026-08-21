@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { decryptFile, decryptPayload, directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, verifyEnvelope, wrapConversationKey } from "./lib/crypto";
 import { getIdentity, listConversations, listMessages, putConversation, putIdentity, putMessage } from "./lib/db";
-import { addRoomMember, claimPair, completePair, createPair, createRoom, downloadEncryptedFile, history, joinPair, pairStatus, registerPush, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile, websocketUrl } from "./lib/relay";
+import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
+import { addRoomMember, claimPair, completePair, createPair, createRoom, downloadEncryptedFile, history, joinPair, pairStatus, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile, websocketUrl } from "./lib/relay";
 import type { ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
 
 type Panel = "none" | "pair" | "join" | "members" | "settings";
@@ -32,14 +33,21 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [typing, setTyping] = useState<string[]>([]);
   const [ready, setReady] = useState(false);
+  const [pushStatus, setPushStatus] = useState<PushStatus>("off");
   const ws = useRef<WebSocket | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
+  const activeIdRef = useRef(activeId);
+  const identityRef = useRef(identity);
   const active = conversations.find(c => c.id === activeId) ?? null;
   const activeMessages = messages[activeId ?? ""] ?? [];
+  activeIdRef.current = activeId;
+  identityRef.current = identity;
 
   const flash = (s: string) => { setToast(s); setTimeout(() => setToast(""), 2200); };
   async function refresh() { setConversations(await listConversations()); }
+  async function refreshPush() { setPushStatus(await currentPushStatus()); }
 
   useEffect(() => {
     (async () => {
@@ -50,6 +58,7 @@ export default function App() {
       if (!activeId && innerWidth > 760) setActiveId(cs[0]?.id ?? null);
       if (id && joinCode) setPanel("join");
       setReady(true);
+      setPushStatus(await currentPushStatus());
     })();
     const onInstall = (e: Event) => { e.preventDefault(); setInstallPrompt(e as InstallPrompt); };
     addEventListener("beforeinstallprompt", onInstall);
@@ -57,22 +66,63 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; conversationId?: string } | undefined;
+      if (data?.type === "kin-open" && data.conversationId) setActiveId(data.conversationId);
+      if (data?.type === "kin-push" && data.conversationId && data.conversationId !== activeIdRef.current) {
+        void (async () => {
+          const current = (await listConversations()).find(c => c.id === data.conversationId);
+          if (!current) return;
+          await putConversation({ ...current, unread: (current.unread ?? 0) + 1, lastPreview: current.lastPreview || "New message", lastMessageAt: Date.now() });
+          await refresh();
+        })();
+      }
+    };
+    navigator.serviceWorker?.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker?.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
+    const n = conversations.reduce((sum, c) => sum + (c.unread ?? 0), 0);
+    if (n > 0) void navigator.setAppBadge?.(n);
+    else void navigator.clearAppBadge?.();
+  }, [conversations]);
+
+  useEffect(() => {
+    if (!identity || pushStatus !== "on") return;
+    const ids = conversations.map(c => c.id);
+    if (!ids.length) return;
+    void registerPushForRooms(identity, ids).catch(() => {});
+  }, [identity?.deviceId, conversations.map(c => c.id).join(","), pushStatus]);
+
+  useEffect(() => {
     if (!identity || !active) return;
     let dead = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
     ws.current?.close();
     (async () => {
       const cached = await listMessages(active.id);
       setMessages(x => ({ ...x, [active.id]: cached }));
-      try { for (const e of await history(identity, active.id)) await ingest(active, e); } catch {}
+      try { for (const e of await history(identity, active.id)) await ingest(active, e, true); } catch {}
       if (active.kind === "group") {
         try {
           const members = await roomMembers(identity, active.id);
-          await putConversation({ ...active, members });
+          await putConversation({ ...active, members, unread: 0 });
           await refresh();
         } catch {}
       }
+      if (active.unread) {
+        await putConversation({ ...active, unread: 0 });
+        await refresh();
+      }
+    })();
+
+    const connect = async () => {
+      if (dead) return;
       try {
         const socket = new WebSocket(await websocketUrl(identity, active.id));
+        socket.onopen = () => { attempt = 0; };
         socket.onmessage = async ev => {
           const f = JSON.parse(String(ev.data));
           if (f.kind === "message") await ingest(active, f);
@@ -83,15 +133,23 @@ export default function App() {
           }
           if (f.kind === "typing" && f.senderDeviceId !== identity.deviceId) setTyping(t => f.active ? [...new Set([...t, f.senderDeviceId])] : t.filter(x => x !== f.senderDeviceId));
         };
-        if (!dead) ws.current = socket; else socket.close();
-      } catch {}
-    })();
-    return () => { dead = true; ws.current?.close(); ws.current = null; setTyping([]); };
+        socket.onclose = () => {
+          if (dead) return;
+          retry = setTimeout(connect, Math.min(10_000, 700 * 2 ** attempt++));
+        };
+        if (dead) { socket.close(); return; }
+        ws.current = socket;
+      } catch {
+        if (!dead) retry = setTimeout(connect, 2000);
+      }
+    };
+    void connect();
+    return () => { dead = true; clearTimeout(retry); ws.current?.close(); ws.current = null; setTyping([]); };
   }, [identity?.deviceId, activeId]);
 
   useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }); }, [activeMessages.length, typing.length]);
 
-  async function ingest(conversation: Conversation, env: CipherEnvelope) {
+  async function ingest(conversation: Conversation, env: CipherEnvelope, fromHistory = false) {
     const current = (await listConversations()).find(c => c.id === conversation.id) ?? conversation;
     const sender = current.members.find(m => m.deviceId === env.senderDeviceId);
     if (!sender || !(await verifyEnvelope(env, sender))) return;
@@ -100,7 +158,10 @@ export default function App() {
       const m: ChatMessage = { id: env.id, conversationId: current.id, senderDeviceId: env.senderDeviceId, createdAt: env.createdAt, payload, status: "delivered" };
       await putMessage(m);
       setMessages(x => ({ ...x, [current.id]: [...(x[current.id] ?? []).filter(y => y.id !== m.id), m].sort((a,b) => a.createdAt - b.createdAt) }));
-      await putConversation({ ...current, lastMessageAt: m.createdAt, lastPreview: payload.type === "text" ? payload.text : payload.type === "file" ? "Attachment" : "" });
+      const mine = env.senderDeviceId === identityRef.current?.deviceId;
+      const viewing = activeIdRef.current === current.id;
+      const unread = fromHistory || mine || viewing ? (viewing ? 0 : current.unread ?? 0) : (current.unread ?? 0) + 1;
+      await putConversation({ ...current, lastMessageAt: m.createdAt, lastPreview: payload.type === "text" ? payload.text : payload.type === "file" ? "Attachment" : "", unread });
       await refresh();
     } catch {}
   }
@@ -115,14 +176,16 @@ export default function App() {
       await sendEnvelope(active.id, env);
       await putMessage({ ...optimistic, status: "sent" });
       setMessages(x => ({ ...x, [active.id]: (x[active.id] ?? []).map(m => m.id === env.id ? { ...m, status: "sent" } : m) }));
-      await putConversation({ ...active, lastMessageAt: env.createdAt, lastPreview: payload.type === "text" ? payload.text : "Attachment" });
+      await putConversation({ ...active, lastMessageAt: env.createdAt, lastPreview: payload.type === "text" ? payload.text : "Attachment", unread: 0 });
       await refresh();
     } catch { flash("Couldn’t send"); }
   }
 
   async function sendText() {
     const text = draft.trim(); if (!text) return;
-    setDraft(""); ws.current?.send(JSON.stringify({ kind: "typing", active: false }));
+    setDraft("");
+    if (composer.current) composer.current.style.height = "";
+    ws.current?.send(JSON.stringify({ kind: "typing", active: false }));
     await send({ type: "text", text });
   }
 
@@ -202,19 +265,27 @@ export default function App() {
   }
 
   async function enableNotifications() {
-    if (!identity || !active || !("serviceWorker" in navigator) || !("PushManager" in window)) return flash("Not available here");
+    const status = await currentPushStatus();
+    if (status === "unavailable") return flash("Notifications aren’t available here");
+    if (status === "needs-install") return flash("Add Kin to your Home Screen first");
+    if (status === "blocked") return flash("Notifications are blocked");
+    if (!identity) return;
     try {
-      const permission = await Notification.requestPermission(); if (permission !== "granted") return;
-      const cfg = await relayConfig(); if (!cfg.vapidPublicKey) return flash("Push not configured");
-      const reg = await navigator.serviceWorker.ready;
-      const raw = cfg.vapidPublicKey.replace(/-/g, "+").replace(/_/g, "/");
-      const key = Uint8Array.from(atob(raw + "===".slice((raw.length+3)%4)), c => c.charCodeAt(0));
-      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-      await registerPush(identity, active.id, sub); flash("Notifications on");
-    } catch { flash("Couldn’t enable notifications"); }
+      const cfg = await relayConfig();
+      if (!cfg.vapidPublicKey) return flash("Push not configured");
+      const sub = await subscribeWebPush();
+      const rooms = await listConversations();
+      await registerPushForRooms(identity, rooms.map(c => c.id), sub);
+      await refreshPush();
+      flash("Notifications on");
+    } catch (err) {
+      await refreshPush();
+      flash(err instanceof Error && err.message === "Permission denied" ? "Notifications were declined" : "Couldn’t enable notifications");
+    }
   }
 
   const sorted = useMemo(() => [...conversations].sort((a,b) => (b.lastMessageAt ?? b.createdAt) - (a.lastMessageAt ?? a.createdAt)), [conversations]);
+  const showIosInstall = isAppleTouchDevice() && !isStandalone();
   if (!ready) return <div className="splash"><Mark/></div>;
   if (!identity) return <Onboarding pairCode={joinCode} create={createFamily} join={joinFamily}/>;
 
@@ -222,8 +293,8 @@ export default function App() {
     <aside className={`sidebar ${active ? "has-active" : ""}`}>
       <header><div className="wordmark"><Mark/><strong>Kin</strong></div><button className="round" onClick={() => setPanel("settings")}>•••</button></header>
       <div className="conversation-list">
-        {sorted.map(c => <button key={c.id} className={`conversation ${c.id===activeId?"active":""}`} onClick={() => setActiveId(c.id)}>
-          <ConversationAvatar c={c} self={identity.deviceId}/><span><strong>{c.title}</strong><small>{c.lastPreview || (c.kind === "group" ? `${c.members.length} people` : "Private")}</small></span><time>{c.lastMessageAt ? time(c.lastMessageAt) : ""}</time>
+        {sorted.map(c => <button key={c.id} className={`conversation ${c.id===activeId?"active":""} ${c.unread?"has-unread":""}`} onClick={() => setActiveId(c.id)}>
+          <ConversationAvatar c={c} self={identity.deviceId}/><span><strong>{c.title}</strong><small>{c.lastPreview || (c.kind === "group" ? `${c.members.length} people` : "Private")}</small></span><span className="meta"><time>{c.lastMessageAt ? time(c.lastMessageAt) : ""}</time>{!!c.unread && <b className="unread">{c.unread > 9 ? "9+" : c.unread}</b>}</span>
         </button>)}
       </div>
       <button className="new-chat" onClick={() => setPanel("join")}>+</button>
@@ -233,7 +304,7 @@ export default function App() {
       {active ? <>
         <header className="chat-head"><button className="back" onClick={() => setActiveId(null)}>‹</button><button className="chat-person" onClick={() => active.kind === "group" && setPanel("members")}><ConversationAvatar c={active} self={identity.deviceId} small/><span><strong>{active.title}</strong><small>{typing.length ? "typing…" : active.kind === "group" ? `${active.members.length} people` : "private"}</small></span></button><button className="round" onClick={() => active.kind === "group" ? startPairing() : setPanel("settings")}>+</button></header>
         <div className="messages" ref={scroll}>{activeMessages.map((m,i) => <Bubble key={m.id} m={m} prev={activeMessages[i-1]} me={identity.deviceId} c={active} openFile={() => openFile(m)}/>)}{typing.length>0&&<div className="typing"><i/><i/><i/></div>}</div>
-        <div className="composer"><input ref={fileInput} type="file" hidden onChange={e => { const f=e.target.files?.[0]; if(f) sendFile(f); e.currentTarget.value=""; }}/><button onClick={() => fileInput.current?.click()}>＋</button><textarea rows={1} placeholder="Message" value={draft} onChange={e => { setDraft(e.target.value); ws.current?.readyState===1&&ws.current.send(JSON.stringify({kind:"typing",active:!!e.target.value})); }} onKeyDown={e => { if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendText();}}}/><button className="send" disabled={!draft.trim()} onClick={sendText}>↑</button></div>
+        <div className="composer"><input ref={fileInput} type="file" hidden onChange={e => { const f=e.target.files?.[0]; if(f) sendFile(f); e.currentTarget.value=""; }}/><button onClick={() => fileInput.current?.click()}>＋</button><textarea ref={composer} rows={1} placeholder="Message" value={draft} onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(120, e.target.scrollHeight)}px`; ws.current?.readyState===1&&ws.current.send(JSON.stringify({kind:"typing",active:!!e.target.value})); }} onKeyDown={e => { if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendText();}}}/><button className="send" disabled={!draft.trim()} onClick={sendText}>↑</button></div>
       </> : <div className="empty"><Mark/><span>Kin</span></div>}
     </main>
 
@@ -241,7 +312,12 @@ export default function App() {
       {panel==="pair"&&pair&&<><h2>Add person</h2>{pair.safety?<div className="paired"><b>✓</b><strong>Paired</strong><div>{pair.safety}</div><small>Compare on both phones</small></div>:<><img className="qr" src={pair.qr}/><div className="code">{pair.code}</div><small>Scan or enter the code</small></>}</>}
       {panel==="join"&&<><h2>Pair</h2><input className="code-input" autoFocus placeholder="Code" value={joinCode} onChange={e=>setJoinCode(e.target.value.toUpperCase())}/><button className="primary" onClick={()=>joinFamily(undefined,joinCode)}>Join</button></>}
       {panel==="members"&&active&&<><div className="sheet-title"><h2>{active.title}</h2><button onClick={startPairing}>＋</button></div>{active.members.map(m=><button className="member" key={m.deviceId} disabled={m.deviceId===identity.deviceId} onClick={()=>privateChat(m)}><Avatar member={m}/><span><strong>{m.displayName}{m.deviceId===identity.deviceId?" · you":""}</strong><small>{m.deviceId===identity.deviceId?"This device":"Private chat"}</small></span></button>)}</>}
-      {panel==="settings"&&<><div className="profile"><Avatar member={publicMember(identity)} size={56}/><strong>{identity.displayName}</strong></div>{installPrompt&&<button className="setting" onClick={()=>installPrompt.prompt()}>Install app</button>}<button className="setting" onClick={enableNotifications}>Notifications</button><button className="setting" onClick={()=>setPanel("join")}>Join with code</button><small className="privacy">Encrypted relay · 7 day delivery window</small></>}
+      {panel==="settings"&&<><div className="profile"><Avatar member={publicMember(identity)} size={56}/><strong>{identity.displayName}</strong></div>
+        {installPrompt&&<button className="setting" onClick={()=>installPrompt.prompt()}>Install app<small>Add Kin to your home screen</small></button>}
+        {showIosInstall&&<div className="hint"><strong>Install Kin</strong><small>Tap Share, then Add to Home Screen. Open the icon to get notifications.</small></div>}
+        <button className="setting" onClick={enableNotifications}><span>Notifications</span><small>{pushStatusLabel(pushStatus)}</small></button>
+        <button className="setting" onClick={()=>setPanel("join")}>Join with code</button>
+        <small className="privacy">Encrypted relay · 7 day delivery window</small></>}
     </section></div>}
     {toast&&<div className="toast">{toast}</div>}
   </div>;

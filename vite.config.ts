@@ -12,22 +12,24 @@ export default defineConfig({
       srcDir: "src",
       filename: "sw.ts",
       injectRegister: null,
+      includeAssets: ["icons/icon-192.png", "icons/icon-512.png", "icons/icon-maskable-512.png", "icons/app-icon.svg"],
       manifest: {
         id: "/",
+        lang: "en",
         name: "Kin",
         short_name: "Kin",
         description: "Private family messaging",
         start_url: "/",
         scope: "/",
         display: "standalone",
-        display_override: ["window-controls-overlay", "standalone"],
+        display_override: ["standalone", "minimal-ui"],
         background_color: "#f7f4ef",
         theme_color: "#171717",
         orientation: "portrait-primary",
         categories: ["social", "communication"],
         icons: [
-          { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+          { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
           { src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" }
         ]
       }
