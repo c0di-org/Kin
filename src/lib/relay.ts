@@ -1,4 +1,4 @@
-import type { CipherEnvelope, LocalIdentity, PairPackage, PairStatus, PublicMember } from "./types";
+import type { ChannelRecord, CipherEnvelope, InvitePreview, InviteRole, InviteSummary, LocalIdentity, PairPackage, PairStatus, PublicMember } from "./types";
 import { sha256, signRequest } from "./crypto";
 
 const base = (import.meta.env.VITE_RELAY_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -16,8 +16,36 @@ async function signedJson<T>(identity: LocalIdentity, method: string, path: stri
 }
 
 /** Signed, so the relay can tell a real creator from anyone squatting a room id they can derive. */
-export async function createRoom(identity: LocalIdentity, id: string, kind: "group" | "direct", title: string, members: PublicMember[]): Promise<void> {
-  await signedJson(identity, "PUT", `/api/rooms/${encodeURIComponent(id)}`, { kind, title, members });
+export async function createRoom(
+  identity: LocalIdentity,
+  id: string,
+  kind: "group" | "direct",
+  title: string,
+  members: PublicMember[],
+  options: { spaceId?: string; keep?: boolean } = {}
+): Promise<void> {
+  await signedJson(identity, "PUT", `/api/rooms/${encodeURIComponent(id)}`, { kind, title, members, ...options });
+}
+
+/**
+ * Walk into a channel on the strength of being in its space.
+ *
+ * The other way in — somebody already inside adding you — needs them online at the moment you
+ * arrive. A channel does not need that, because its key was derivable from the space key all
+ * along; this just asks the relay to let the roster catch up with what is already true.
+ */
+export async function joinChannel(identity: LocalIdentity, roomId: string, member: PublicMember): Promise<void> {
+  await signedJson(identity, "POST", `/api/rooms/${encodeURIComponent(roomId)}/join`, member);
+}
+
+export async function listChannels(identity: LocalIdentity, spaceId: string): Promise<ChannelRecord[]> {
+  return signedJson(identity, "GET", `/api/rooms/${encodeURIComponent(spaceId)}/channels`);
+}
+export async function publishChannel(identity: LocalIdentity, spaceId: string, channel: Omit<ChannelRecord, "createdAt">): Promise<void> {
+  await signedJson(identity, "POST", `/api/rooms/${encodeURIComponent(spaceId)}/channels`, channel);
+}
+export async function unpublishChannel(identity: LocalIdentity, spaceId: string, channelId: string): Promise<void> {
+  await signedJson(identity, "DELETE", `/api/rooms/${encodeURIComponent(spaceId)}/channels/${encodeURIComponent(channelId)}`);
 }
 
 export async function roomMembers(identity: LocalIdentity, roomId: string): Promise<PublicMember[]> {
@@ -55,6 +83,44 @@ export async function claimPair(code: string, claimToken: string): Promise<PairP
   if (res.status === 204) throw new Error("Not ready");
   if (!res.ok) throw new Error((await res.text()) || `${res.status}`);
   return res.json() as Promise<PairPackage>;
+}
+
+// ---------- standing invites ----------
+
+/**
+ * Mint an invite. `code` is a hash of the secret rather than something the relay allocates, so
+ * the path being signed is one the client already knows, and the secret behind it never travels.
+ */
+export async function createInvite(identity: LocalIdentity, code: string, ticket: {
+  proof: string;
+  room: { id: string; kind: "group" | "direct"; title: string; emoji?: string; spaceId?: string };
+  inviter: PublicMember;
+  role: InviteRole;
+  wrappedKey: string;
+  iv: string;
+  expiresAt: number;
+  maxUses: number | null;
+}): Promise<{ code: string; expiresAt: number; maxUses: number | null }> {
+  return signedJson(identity, "PUT", `/api/invite/${encodeURIComponent(code)}`, ticket);
+}
+
+export async function previewInvite(code: string): Promise<InvitePreview> {
+  return json(`/api/invite/${encodeURIComponent(code)}`);
+}
+
+export async function redeemInvite(identity: LocalIdentity, code: string, proof: string, member: PublicMember): Promise<{
+  room: { id: string; kind: "group" | "direct"; title: string; spaceId?: string };
+  role: InviteRole;
+}> {
+  return signedJson(identity, "POST", `/api/invite/${encodeURIComponent(code)}/redeem`, { proof, member });
+}
+
+export async function revokeInvite(identity: LocalIdentity, code: string, member: PublicMember): Promise<void> {
+  await signedJson(identity, "POST", `/api/invite/${encodeURIComponent(code)}/revoke`, { member });
+}
+
+export async function listInvites(identity: LocalIdentity, roomId: string): Promise<InviteSummary[]> {
+  return signedJson(identity, "GET", `/api/rooms/${encodeURIComponent(roomId)}/invites`);
 }
 
 export async function sendEnvelope(roomId: string, envelope: CipherEnvelope): Promise<void> {

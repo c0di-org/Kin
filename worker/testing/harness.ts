@@ -93,6 +93,39 @@ export function fakeEnv(overrides: Record<string, unknown> = {}) {
   return { ATTACHMENTS: new FakeR2(), ...overrides } as any;
 }
 
+/**
+ * A Durable Object namespace whose stubs are the objects themselves.
+ *
+ * The worker now has objects that call each other — an invite asks a room to enrol somebody, a
+ * channel asks its space who is in it — and those are plain method calls on a typed stub, so a
+ * namespace that hands back the instance is a faithful enough double to drive both sides.
+ */
+export function fakeNamespace<T>(make: (id: string) => T) {
+  const instances = new Map<string, T>();
+  return {
+    instances,
+    idFromName: (name: string) => name,
+    get: (name: string) => {
+      const existing = instances.get(name);
+      if (existing) return existing;
+      const created = make(name);
+      instances.set(name, created);
+      return created;
+    }
+  };
+}
+
+/** A ROOMS namespace of real room objects, each with its own storage. */
+export function fakeRooms(RoomClass: new (ctx: any, env: any) => any, env: any) {
+  const storages = new Map<string, FakeStorage>();
+  const ns = fakeNamespace((id: string) => {
+    const storage = new FakeStorage();
+    storages.set(id, storage);
+    return new RoomClass(fakeCtx(storage), env);
+  });
+  return Object.assign(ns, { storages });
+}
+
 // ---------- identities that sign exactly like src/lib/crypto.ts ----------
 
 const enc = new TextEncoder();
@@ -205,18 +238,33 @@ export type Fixture = {
   bob: TestIdentity;
   mallory: TestIdentity;
   seed(kind?: "group" | "direct", members?: TestIdentity[], id?: string): Promise<void>;
+  /** Stand up a second, fully seeded room in the ROOMS namespace — a space, or a channel. */
+  seedRoom(id: string, members: TestIdentity[], meta?: Record<string, unknown>): Promise<any>;
 };
 
 export async function newFixture(RoomClass: new (ctx: any, env: any) => any): Promise<Fixture> {
   const storage = new FakeStorage();
   const env = fakeEnv();
+  env.ROOMS = fakeRooms(RoomClass, env);
   const [alice, bob, mallory] = await Promise.all([makeIdentity("Alice"), makeIdentity("Bob"), makeIdentity("Mallory")]);
+  const room = new RoomClass(fakeCtx(storage), env);
+  // The room under test answers to its own id inside the namespace too, so an object that reaches
+  // for it by name — an invite enrolling somebody into it — gets this one and not a fresh empty.
+  env.ROOMS.instances.set(ROOM, room);
+  env.ROOMS.storages.set(ROOM, storage);
   const fixture: Fixture = {
     storage, env, alice, bob, mallory,
-    room: new RoomClass(fakeCtx(storage), env),
+    room,
     async seed(kind = "group", members = [alice, bob], id = ROOM) {
       await storage.put("meta", { id, kind, title: "Family", createdAt: Date.now() });
       for (const m of members) await storage.put(`member:${m.deviceId}`, m.member());
+    },
+    async seedRoom(id, members, meta = {}) {
+      const other = env.ROOMS.get(id);
+      const otherStorage = env.ROOMS.storages.get(id)!;
+      await otherStorage.put("meta", { id, kind: "group", title: id, createdAt: Date.now(), ...meta });
+      for (const m of members) await otherStorage.put(`member:${m.deviceId}`, m.member());
+      return other;
     }
   };
   return fixture;

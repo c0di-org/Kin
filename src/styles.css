@@ -985,3 +985,85 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .crash details { margin-top: 10px; max-width: 320px; color: var(--sub); font-size: 13px; }
 .crash summary { cursor: pointer; font-weight: 700; }
 .crash pre { margin-top: 8px; white-space: pre-wrap; word-break: break-word; text-align: left; font-size: 12px; opacity: .8; }
+
+/* ---------- spaces, channels and links ---------- */
+
+/* A channel row sits under its space: indented, quieter, and marked by its own face rather than
+   by an avatar stack, because the people in it are the people in the space above it. */
+.conversation.is-channel { margin-left: 18px; padding-left: 8px; border-left: 2px solid var(--line); border-radius: 0 26px 26px 0; }
+.conversation.is-channel strong { font-size: 15.5px; font-weight: 700; }
+.channel-face {
+  width: 34px; height: 34px; flex: none; border-radius: 12px; display: grid; place-items: center;
+  font-size: 17px; background: var(--grad-soft); border: 1px solid var(--glass-line);
+}
+.channel-toggle, .channel-add {
+  display: block; margin: 2px 0 2px 30px; padding: 4px 8px; border-radius: 12px;
+  font-size: 12.5px; font-weight: 800; color: var(--sub); letter-spacing: .01em; transition: color .16s, background .16s;
+}
+.channel-toggle:hover, .channel-add:hover { color: var(--accent-ink); background: rgba(255, 255, 255, .5); }
+.channel-add { color: var(--accent-ink); }
+
+/* The invite sheet's two rows of choices. A choice is a card because it carries an explanation;
+   a pill is a pill because "a day / a week / a month" explains itself. */
+.choice-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.choice {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px; text-align: left;
+  padding: 12px; border-radius: 20px; border: 1px solid var(--glass-line); background: rgba(255, 255, 255, .38);
+  transition: transform .16s cubic-bezier(.3, 1.5, .5, 1), background .16s, box-shadow .16s;
+}
+.choice > span { font-size: 21px; }
+.choice strong { font-size: 14.5px; font-weight: 800; }
+.choice small { font-size: 12px; color: var(--sub); font-weight: 600; line-height: 1.35; }
+.choice.picked { background: rgba(255, 255, 255, .95); box-shadow: var(--shadow), var(--gloss); outline: 2px solid rgba(124, 108, 255, .5); }
+.choice:hover { transform: translateY(-2px); }
+
+.pill-row { display: flex; flex-wrap: wrap; gap: 7px; }
+.pill {
+  padding: 8px 14px; border-radius: 999px; font-size: 13.5px; font-weight: 800;
+  border: 1px solid var(--glass-line); background: rgba(255, 255, 255, .38); transition: transform .16s, background .16s, box-shadow .16s;
+}
+.pill:hover { transform: translateY(-1px); }
+.pill.picked { background: rgba(255, 255, 255, .95); box-shadow: var(--shadow), var(--gloss); outline: 2px solid rgba(124, 108, 255, .5); }
+
+.pair-qr { display: block; width: 230px; height: 230px; margin: 6px auto 12px; border-radius: 26px; box-shadow: var(--shadow); background: #fff; padding: 8px; }
+.pair-hint { font-size: 14px; color: var(--sub); font-weight: 600; line-height: 1.55; text-align: center; margin-bottom: 6px; }
+.pair-hint b { color: var(--ink); font-weight: 800; }
+
+.danger-link { margin-left: auto; flex: none; font-size: 13px; font-weight: 800; color: var(--danger, #c02b46); padding: 6px 10px; border-radius: 12px; }
+.danger-link:hover { background: rgba(192, 43, 70, .1); }
+
+/* Who is inviting you, on the screen a link lands on. */
+.invite-from { display: flex; align-items: center; justify-content: center; gap: 10px; margin: -4px 0 4px; font-weight: 800; }
+
+/* A setting that is a switch rather than a destination. */
+.setting-body { display: flex !important; flex-direction: column; gap: 2px; width: auto !important; height: auto !important; background: none !important; border: none !important; place-items: start !important; text-align: left !important; border-radius: 0 !important; }
+.setting-body strong { font-size: 15.5px; font-weight: 800; }
+.setting-body small { font-size: 12.5px; color: var(--sub); font-weight: 600; line-height: 1.4; }
+.setting.toggle .switch {
+  margin-left: auto; flex: none; width: 46px; height: 27px; border-radius: 999px;
+  background: rgba(36, 31, 61, .16); position: relative; transition: background .18s;
+}
+.setting.toggle .switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 21px; height: 21px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); transition: transform .18s cubic-bezier(.3, 1.5, .5, 1);
+}
+.setting.toggle.on .switch { background: var(--accent); }
+.setting.toggle.on .switch::after { transform: translateX(19px); }
+
+/* A viewer's composer says why there is nothing to type into, rather than leaving a gap. */
+.composer.read-only { display: block; text-align: center; }
+.composer.read-only p { font-size: 13.5px; color: var(--sub); font-weight: 600; line-height: 1.5; padding: 4px 8px; margin: 0; }
+
+@media (max-width: 760px) {
+  .choice-row { grid-template-columns: 1fr; }
+}
+
+.link-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.link-field {
+  flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--sub);
+  padding: 10px 12px; border-radius: 16px; border: 1px solid var(--glass-line);
+  background: rgba(255, 255, 255, .5); text-overflow: ellipsis;
+}
+.sheet .onboard-label { margin-top: 10px; }
+.sheet .onboard-label:first-of-type { margin-top: 2px; }
+.choice-row, .pill-row { margin-bottom: 4px; }

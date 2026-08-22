@@ -4,8 +4,12 @@ import { directConversation, encryptFile, encryptPayload, generateIdentity, publ
 import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage, undismissDirect } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
 import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
-import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
+import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, InvitePreview, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
+import {
+  acceptInvite, canPost, createChannel, createSpace, discoverChannels, isFullMember,
+  parseInviteLink, removeChannel, spaceTree
+} from "./lib/spaces";
 import { deletedIds, firstName, mergeMessages, previewOf, redact } from "./lib/ingest";
 import { dayLabel, greeting, listStamp } from "./lib/format";
 import { useConversationSync } from "./hooks/useConversationSync";
@@ -18,17 +22,21 @@ import { Lightbox } from "./components/Media";
 import { Avatar, ConversationAvatar, Mark } from "./components/Avatar";
 import { FamilyCard } from "./components/FamilyCard";
 import { ProfileEditor } from "./components/ProfileEditor";
+import { InvitePanel } from "./components/InvitePanel";
+import JoinInvite from "./components/JoinInvite";
+import NewSpace from "./components/NewSpace";
 import { Bubble, type QuotedMessage } from "./components/Bubble";
 import { Sheet } from "./components/Sheet";
 
-type Panel = "none" | "pair" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile";
+type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
 const PANEL_LABELS: Record<Panel, string> = {
-  none: "", doodle: "Doodle", pair: "Add a family member", join: "Join a family",
-  members: "Chat details", settings: "Settings", attach: "Send something",
-  add: "Bring people in", profile: "Your look"
+  none: "", doodle: "Doodle", pair: "Add someone in person", invite: "Share a link",
+  join: "Join with a code", members: "Chat details", settings: "Settings",
+  attach: "Send something", add: "Start something", profile: "Your look",
+  new: "Make a new place"
 };
 
 
@@ -41,6 +49,9 @@ export default function App() {
   const [panel, setPanel] = useState<Panel>("none");
   const [pair, setPair] = useState<{ code: string; token: string; qr?: string; link?: string; safety?: string } | null>(null);
   const [joinCode, setJoinCode] = useState(new URLSearchParams(location.search).get("pair") ?? "");
+  const [inviteLanding, setInviteLanding] = useState(() => parseInviteLink(location.hash));
+  const [newIn, setNewIn] = useState<Conversation | null>(null);
+  const [openSpaces, setOpenSpaces] = useState<Record<string, boolean>>({});
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(null);
   const [toast, setToast] = useState("");
   const [typing, setTyping] = useState<string[]>([]);
@@ -281,6 +292,7 @@ export default function App() {
     const sweep = (force: boolean) => {
       if (document.visibilityState !== "visible") return;
       void discoverDirectChats(force);
+      void sweepChannels();
       void flushFailed();
     };
     sweep(true);
@@ -543,6 +555,108 @@ export default function App() {
     flash(pushed.some(r => r.status === "rejected") ? "Saved — your family will see it next time you’re online" : "Looking good! ✨");
   }
 
+  // ---------- groups, channels and links ----------
+
+  /** A brand new group of its own, from the + menu rather than from onboarding. */
+  async function startGroup(title: string, emoji: string, keep: boolean): Promise<void> {
+    const me = identityRef.current; if (!me) return;
+    setPanel("none"); setNewIn(null);
+    try {
+      const space = await createSpace(me, title, { emoji, keep });
+      await putConversation(space);
+      await refresh();
+      setActiveId(space.id);
+      confetti(); sounds.tada();
+      flash(`${title} is yours — share a link to bring people in 🔗`);
+    } catch { flash("Couldn’t make that — are you online?"); }
+  }
+
+  /** A channel inside a space. Nobody needs to be online for the rest of the space to get it. */
+  async function startChannel(space: Conversation, title: string, emoji: string, keep: boolean): Promise<void> {
+    const me = identityRef.current; if (!me) return;
+    setPanel("none"); setNewIn(null);
+    try {
+      const channel = await createChannel(me, space, title, { emoji, keep });
+      await putConversation(channel);
+      await refresh();
+      setOpenSpaces(x => ({ ...x, [space.id]: true }));
+      setActiveId(channel.id);
+      sounds.tada();
+    } catch { flash("Couldn’t make that channel — are you online?"); }
+  }
+
+  async function dropChannel(channel: Conversation): Promise<void> {
+    const me = identityRef.current;
+    const space = conversations.find(c => c.id === channel.spaceId);
+    if (!me || !space) return;
+    try { await removeChannel(me, space, channel.id); } catch { /* it goes on the next sweep */ }
+    await deleteConversation(channel.id);
+    setActiveId(space.id); setPanel("none"); setConfirming(null);
+    await refresh();
+    flash("Channel removed for everyone");
+  }
+
+  /**
+   * Walk through an invite link.
+   *
+   * This is the one entry point that may run before there is an identity at all — somebody who
+   * has never opened Kin tapping a link is the case it exists for — so it makes one on the way
+   * through, under whatever name they chose for *this* room rather than a global one.
+   */
+  async function takeInvite(preview: InvitePreview, profile: { displayName: string; avatarSeed: string }): Promise<void> {
+    let me = identityRef.current;
+    if (!me) {
+      me = { ...(await generateIdentity(profile.displayName)), avatarSeed: profile.avatarSeed };
+      await putIdentity(me);
+      identityRef.current = me;
+      setIdentity(me);
+    }
+    try {
+      const conv = await acceptInvite(me, inviteLanding!.code, inviteLanding!.secret, preview, profile);
+      const existing = (await listConversations()).find(c => c.id === conv.id);
+      await putConversation(existing ? { ...existing, key: conv.key, role: conv.role } : conv);
+      clearInviteLanding();
+      await refresh();
+      setActiveId(conv.id);
+      confetti(); sounds.tada();
+      flash(conv.role === "viewer" ? "You’re in — have a look around 👀" : `Welcome to ${conv.title}! 🎉`);
+    } catch {
+      flash("That link didn’t work — ask for a fresh one");
+      clearInviteLanding();
+    }
+  }
+
+  function clearInviteLanding(): void {
+    setInviteLanding(null);
+    window.history.replaceState({}, "", location.pathname);
+  }
+
+  /**
+   * Pull each space's channel directory and open anything new.
+   *
+   * A channel created while this device was asleep has no message to announce it — the directory
+   * is the announcement, and it is durable precisely so that arriving late still arrives at the
+   * same set of channels as everybody else.
+   */
+  async function sweepChannels(): Promise<void> {
+    const me = identityRef.current;
+    if (!me || !navigator.onLine) return;
+    const convs = await listConversations();
+    const known = new Set(convs.map(c => c.id));
+    let found = false;
+    for (const space of convs) {
+      if (space.kind !== "group" || space.spaceId) continue;
+      try {
+        for (const channel of await discoverChannels(me, space, known)) {
+          await putConversation(channel);
+          known.add(channel.id);
+          found = true;
+        }
+      } catch { /* not reachable right now — the next sweep tries again */ }
+    }
+    if (found) { await refresh(); sounds.receive(); }
+  }
+
   // ---------- family lifecycle ----------
   async function createFamily(name: string, avatar: string, familyName: string): Promise<void> {
     const id = { ...(await generateIdentity(name)), avatarSeed: `e:${avatar}` };
@@ -716,7 +830,12 @@ export default function App() {
     return { visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions, deleted: deletedIds(sortedMsgs) };
   }, [activeMessages]);
   // With one or two chats a list is mostly empty space — show a proper card for each instead.
-  const showCards = sorted.length > 0 && sorted.length <= 3;
+  // Big friendly cards are for the small flat case — a family and a couple of chats. The moment a
+  // space has channels there is a hierarchy to show, and a grid of equal cards is the one shape
+  // that cannot show it, so the list takes over.
+  const tree = useMemo(() => spaceTree(sorted), [sorted]);
+  const showCards = sorted.length > 0 && sorted.length <= 3
+    && !tree.orphans.length && tree.spaces.every(n => !n.channels.length);
   // Reload on every conversation refresh rather than off a digest: a chat can gain messages without
   // its summary changing (history arriving for a chat we just discovered, for one).
   useEffect(() => {
@@ -762,7 +881,30 @@ export default function App() {
   const typingNames = typing.map(d => active?.members.find(m => m.deviceId === d)?.displayName).filter(Boolean).map(n => firstName(n!));
   const showIosInstall = isAppleTouchDevice() && !isStandalone();
 
+  /** One row of the sidebar, whether it is a space, a channel under one, or a direct chat. */
+  const row = (c: Conversation, rolledUpUnread?: number, nested = false) => {
+    const unread = rolledUpUnread ?? c.unread ?? 0;
+    const face = c.emoji ?? (c.kind === "group" ? "🏡" : null);
+    return <button key={c.id} className={`conversation ${nested ? "is-channel" : ""} ${c.id === activeId ? "active" : ""}`}
+      onClick={() => setActiveId(c.id)}>
+      {nested ? <span className="channel-face" aria-hidden>{face}</span> : <ConversationAvatar c={c} self={identity!.deviceId}/>}
+      <span>
+        <strong>{c.kind === "group" && !nested && face ? `${c.title} ${face}` : c.title}</strong>
+        <small>{c.lastPreview
+          ? `${c.lastPreviewSender ? `${c.lastPreviewSender}: ` : ""}${c.lastPreview}`
+          : c.kind === "group" ? `${c.members.length} of you` : "Just the two of you"}</small>
+      </span>
+      <span className="conversation-meta">
+        <time>{c.lastMessageAt ? listStamp(c.lastMessageAt) : ""}</time>
+        {unread > 0 && <i className="unread">{unread > 9 ? "9+" : unread}</i>}
+      </span>
+    </button>;
+  };
+
   if (!ready) return <div className="splash"><Aurora/><Mark/></div>;
+  // An invite link is answered before onboarding: somebody who has never opened Kin should be
+  // shown what they were invited to, not asked to start a family they were not invited to start.
+  if (inviteLanding) return <JoinInvite code={inviteLanding.code} onAccept={takeInvite} onCancel={clearInviteLanding}/>;
   if (!identity) return <Onboarding pairCode={joinCode} create={createFamily} join={(n, a, c) => joinFamily(n, a, c)}/>;
 
   return <div className={`app ${online ? "" : "is-offline"}`}>
@@ -778,17 +920,27 @@ export default function App() {
         {showCards && sorted.map(c => <FamilyCard key={c.id} c={c} self={identity.deviceId} active={c.id === activeId}
           recent={recent[c.id] ?? []} onOpen={() => setActiveId(c.id)}
           onInvite={() => { setActiveId(c.id); void startPairing(); }}/>)}
-        {!showCards && sorted.map(c => <button key={c.id} className={`conversation ${c.id === activeId ? "active" : ""}`} onClick={() => setActiveId(c.id)}>
-          <ConversationAvatar c={c} self={identity.deviceId}/>
-          <span>
-            <strong>{c.kind === "group" ? `${c.title} 🏡` : c.title}</strong>
-            <small>{c.lastPreview ? `${c.lastPreviewSender ? `${c.lastPreviewSender}: ` : ""}${c.lastPreview}` : c.kind === "group" ? `${c.members.length} of you` : "Just the two of you"}</small>
-          </span>
-          <span className="conversation-meta">
-            <time>{c.lastMessageAt ? listStamp(c.lastMessageAt) : ""}</time>
-            {(c.unread ?? 0) > 0 && <i className="unread">{(c.unread ?? 0) > 9 ? "9+" : c.unread}</i>}
-          </span>
-        </button>)}
+        {!showCards && <>
+          {tree.spaces.map(node => {
+            const expanded = openSpaces[node.space.id] ?? node.channels.some(c => c.id === activeId);
+            return <Fragment key={node.space.id}>
+              {row(node.space, node.channels.length ? node.unread : undefined)}
+              {/* The twisty only exists once there is something behind it — a plain group stays a
+                  plain row, and nothing hints at a hierarchy that has not been asked for yet. */}
+              {node.channels.length > 0 && <>
+                <button className="channel-toggle" aria-expanded={expanded}
+                  onClick={() => setOpenSpaces(x => ({ ...x, [node.space.id]: !expanded }))}>
+                  {expanded ? "▾" : "▸"} {node.channels.length} {node.channels.length === 1 ? "channel" : "channels"}
+                </button>
+                {expanded && node.channels.map(c => row(c, undefined, true))}
+              </>}
+              {expanded && isFullMember(node.space) && <button className="channel-add"
+                onClick={() => { setNewIn(node.space); setPanel("new"); }}>+ New channel</button>}
+            </Fragment>;
+          })}
+          {tree.orphans.map(c => row(c))}
+          {tree.directs.map(c => row(c))}
+        </>}
       </div>
       <button className="new-chat" onClick={() => setPanel("add")} aria-label="Add">+</button>
     </aside>
@@ -802,19 +954,24 @@ export default function App() {
           <button className="chat-person" onClick={() => { setConfirming(null); setPanel("members"); }}>
             <ConversationAvatar c={active} self={identity.deviceId} small/>
             <span>
-              <strong>{active.kind === "group" ? `${active.title} 🏡` : active.title}</strong>
-              <small>{typingNames.length ? `${typingNames.join(" and ")} is typing…` : active.kind === "group" ? active.members.map(m => firstName(m.displayName)).join(", ") : "Private chat"}</small>
+              <strong>{active.kind === "group" ? `${active.title} ${active.emoji ?? "🏡"}` : active.title}</strong>
+              <small>{typingNames.length
+                ? `${typingNames.join(" and ")} is typing…`
+                : active.spaceId
+                  ? `${conversations.find(c => c.id === active.spaceId)?.title ?? "Channel"} · ${active.members.length}`
+                  : active.kind === "group" ? active.members.map(m => firstName(m.displayName)).join(", ") : "Private chat"}</small>
             </span>
           </button>
-          {active.kind === "group" && <button className="round" onClick={() => void startPairing()} aria-label="Invite">💌</button>}
+          {active.kind === "group" && isFullMember(active) &&
+            <button className="round" onClick={() => setPanel("invite")} aria-label="Invite">💌</button>}
         </header>
 
         <div className="messages" ref={scroll} onClick={() => setReactFor(null)}>
           {active.kind === "group" && active.members.length === 1 && <div className="invite-card">
-            <span className="invite-emoji">👨‍👩‍👧‍👦</span>
+            <span className="invite-emoji">{active.emoji ?? "👋"}</span>
             <strong>It’s just you so far!</strong>
-            <p>Invite your family — open Kin on their phone, scan your code, and you’re together.</p>
-            <button className="primary" onClick={() => void startPairing()}>Invite my family 💌</button>
+            <p>Send a link to whoever belongs here. It keeps working whether or not you’re online when they open it.</p>
+            <button className="primary" onClick={() => setPanel("invite")}>Share a link 🔗</button>
           </div>}
           {visible.length === 0 && active.members.length > 1 && <div className="hello-card">👋<p>Say hi!</p></div>}
           {visible.map((m, i) => {
@@ -841,7 +998,11 @@ export default function App() {
           {typingNames.length > 0 && <div className="typing"><i/><i/><i/></div>}
         </div>
 
-        <div className="composer" ref={composerBox}>
+        {!canPost(active)
+          ? <div className="composer read-only" ref={composerBox}>
+              <p>👀 You’re here to look around. {firstName(active.members.find(m => m.deviceId !== identity.deviceId)?.displayName ?? "Whoever")} shared this with you to see.</p>
+            </div>
+          : <div className="composer" ref={composerBox}>
           {replyTo && !rec && <div className="reply-chip">
             <span><b>Replying to {nameFor(replyTo.senderDeviceId)}</b><em>{previewOf(replyTo.payload) || "Message"}</em></span>
             <button onClick={() => setReplyTo(null)} aria-label="Cancel reply">✕</button>
@@ -863,7 +1024,7 @@ export default function App() {
               ? <button className="send" onClick={() => void sendText()} aria-label="Send">↑</button>
               : <button className="composer-btn mic" onClick={() => void startRecording()} aria-label="Record voice note">🎤</button>}
           </>}
-        </div>
+            </div>}
       </> : <div className="empty"><Mark/><span>Pick a chat to get cozy</span></div>}
     </main>
 
@@ -893,12 +1054,25 @@ export default function App() {
         </div>
       </>}
       {panel === "add" && <>
-        <h2>Bring people in</h2>
-        {sorted.filter(c => c.kind === "group").map(c => <button key={c.id} className="member" onClick={() => { setActiveId(c.id); void startPairing(); }}>
-          <span className="member-emoji">💌</span><span><strong>Invite to {c.title}</strong><small>Show a code or QR to scan</small></span>
+        <h2>Start something</h2>
+        <button className="member" onClick={() => { setNewIn(null); setPanel("new"); }}>
+          <span className="member-emoji">✨</span><span><strong>New group</strong><small>Name it, then send a link to whoever should be in it</small></span>
+        </button>
+        {tree.spaces.filter(n => isFullMember(n.space)).map(n => <button key={n.space.id} className="member"
+          onClick={() => { setNewIn(n.space); setPanel("new"); }}>
+          <span className="member-emoji">{n.space.emoji ?? "🏡"}</span>
+          <span><strong>New channel in {n.space.title}</strong><small>A room of its own inside the group</small></span>
         </button>)}
-        <button className="member" onClick={() => setPanel("join")}><span className="member-emoji">🔗</span><span><strong>Join with a code</strong><small>Someone sent you an invite</small></span></button>
+        {sorted.filter(c => c.kind === "group" && isFullMember(c)).map(c => <button key={c.id} className="member"
+          onClick={() => { setActiveId(c.id); setPanel("invite"); }}>
+          <span className="member-emoji">🔗</span><span><strong>Invite to {c.title}</strong><small>Share a link that works whenever they open it</small></span>
+        </button>)}
+        <button className="member" onClick={() => setPanel("join")}><span className="member-emoji">🎟️</span><span><strong>Join with a code</strong><small>Someone read you a code in person</small></span></button>
       </>}
+      {panel === "new" && identity && <NewSpace space={newIn}
+        onCancel={() => { setPanel("none"); setNewIn(null); }}
+        onCreate={(title, emoji, keep) => newIn ? startChannel(newIn, title, emoji, keep) : startGroup(title, emoji, keep)}/>}
+      {panel === "invite" && active && identity && <InvitePanel identity={identity} conversation={active} onFlash={flash}/>}
       {panel === "pair" && <>
         <h2>Add a family member</h2>
         {!pair && <div className="hello-card">⏳<p>Getting your code…</p></div>}
@@ -916,7 +1090,13 @@ export default function App() {
         <button className="primary" onClick={() => void joinFamily(undefined, undefined, joinCode)}>Join 🎉</button>
       </>}
       {panel === "members" && active && (active.kind === "group" ? <>
-        <div className="sheet-title"><h2>{active.title} 🏡</h2><button onClick={() => void startPairing()} aria-label="Invite">💌</button></div>
+        <div className="sheet-title">
+          <h2>{active.title} {active.emoji ?? "🏡"}</h2>
+          {isFullMember(active) && <button onClick={() => setPanel("invite")} aria-label="Invite">💌</button>}
+        </div>
+        {active.keep && <p className="sheet-sub">🖼️ Everything here is kept until someone deletes it.</p>}
+        {active.role === "viewer" && <p className="sheet-sub">👀 You’re here to look — you can’t post in this one.</p>}
+        {active.role === "guest" && <p className="sheet-sub">💬 You’re a guest here. You can join in, but not invite others.</p>}
         {active.members.map(m => {
           const alerted = active.keyAlerts?.includes(m.deviceId);
           const me = m.deviceId === identity.deviceId;
@@ -938,7 +1118,28 @@ export default function App() {
             </div>}
           </div>;
         })}
+        {isFullMember(active) && <button className="setting" onClick={() => void startPairing()}>
+          <span>🤝</span>
+          <span className="setting-body">
+            <strong>Add someone in person</strong>
+            <small>Show a code to scan while you’re both here</small>
+          </span>
+        </button>}
         <div className="sheet-foot">
+          {active.spaceId
+            ? <>
+                <button className="danger-row" onClick={() => setConfirming(x => x === "channel" ? null : "channel")}>
+                  <span>🗑️</span>Delete this channel
+                </button>
+                {confirming === "channel" && <div className="confirm">
+                  <p><b>Delete {active.title}?</b> It goes from everyone’s Kin, along with whatever is still in it. The rest of {conversations.find(c => c.id === active.spaceId)?.title ?? "the group"} is untouched.</p>
+                  <div className="confirm-actions">
+                    <button className="chip-btn" onClick={() => setConfirming(null)}>Keep it</button>
+                    <button className="danger-btn" onClick={() => void dropChannel(active)}>Delete</button>
+                  </div>
+                </div>}
+              </>
+            : <>
           <button className="danger-row" onClick={() => setConfirming(x => x === "leave" ? null : "leave")}>
             <span>🚪</span>Leave this family
           </button>
@@ -949,6 +1150,7 @@ export default function App() {
               <button className="danger-btn" disabled={busy} onClick={() => void leaveConversation(active)}>Leave</button>
             </div>
           </div>}
+            </>}
         </div>
       </> : <>
         <h2>{active.title}</h2>
