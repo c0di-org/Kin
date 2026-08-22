@@ -91,7 +91,7 @@ export function Lightbox({ att, url, onClose }: { att: AttachmentPayload; url: s
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
   }, [onClose]);
-  return <div className="lightbox" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+  return <div className="lightbox" role="dialog" aria-modal="true" aria-label={att.name || "Photo"} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
     {mediaKind(att) === "video" ? <video src={url} controls autoPlay playsInline /> : <img src={url} alt={att.name} />}
     <div className="lightbox-bar">
       {canShare && <button className="chip-btn" onClick={() => void shareFile(att.fileId, att.name)}>Share</button>}

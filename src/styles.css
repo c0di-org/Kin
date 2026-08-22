@@ -632,7 +632,17 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   scrollbar-width: none;
 }
 .sheet::-webkit-scrollbar { display: none; }
-.grab { width: 46px; height: 5px; border-radius: 5px; background: rgba(60, 55, 130, .18); margin: 2px auto 18px; }
+.grab {
+  display: block; width: 46px; height: 5px; border-radius: 5px;
+  background: rgba(60, 55, 130, .18); margin: 2px auto 18px;
+  /* Drawn small, but a tap target has to be reachable: the padding is the button, the bar is
+     just what you can see of it. */
+  padding: 12px 22px; background-clip: content-box; box-sizing: content-box;
+  margin-top: -10px; margin-bottom: 6px;
+}
+.grab:hover { background-color: rgba(60, 55, 130, .32); }
+/* An off-screen mirror of the toast, so it is announced rather than only drawn. */
+.toast-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .sheet h2 { font-size: 24px; font-weight: 1000; margin: 4px 0 16px; letter-spacing: -.3px; }
 .sheet-sub { margin: -10px 0 14px; }
 .sheet-title { display: flex; align-items: center; justify-content: space-between; }

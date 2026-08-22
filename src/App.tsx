@@ -19,11 +19,17 @@ import { Avatar, ConversationAvatar, Mark } from "./components/Avatar";
 import { FamilyCard } from "./components/FamilyCard";
 import { ProfileEditor } from "./components/ProfileEditor";
 import { Bubble, type QuotedMessage } from "./components/Bubble";
+import { Sheet } from "./components/Sheet";
 
 type Panel = "none" | "pair" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
+const PANEL_LABELS: Record<Panel, string> = {
+  none: "", doodle: "Doodle", pair: "Add a family member", join: "Join a family",
+  members: "Family members", settings: "Settings", attach: "Send something",
+  add: "Bring people in", profile: "Your look"
+};
 
 
 export default function App() {
@@ -704,10 +710,10 @@ export default function App() {
 
   return <div className={`app ${online ? "" : "is-offline"}`}>
     <Aurora/>
-    {!online && <div className="offline-bar">📡 Offline — we’ll send when you’re back</div>}
+    {!online && <div className="offline-bar" role="status">📡 Offline — we’ll send when you’re back</div>}
     <aside className={`sidebar ${active ? "has-active" : ""}`}>
       <header>
-        <div className="wordmark"><Mark/><strong>Kin</strong></div>
+        <h1 className="wordmark"><Mark/><strong>Kin</strong></h1>
         <button className="round" onClick={() => setPanel("settings")} aria-label="Settings"><Avatar member={publicMember(identity)} size={38}/></button>
       </header>
       <p className="greeting">{greeting()} <b>{firstName(identity.displayName)}</b></p>
@@ -811,15 +817,15 @@ export default function App() {
 
     {lightbox && <Lightbox att={lightbox.att} url={lightbox.url} onClose={() => setLightbox(null)}/>}
 
-    {shareIntake && <div className="scrim" onMouseDown={e => e.target === e.currentTarget && setShareIntake(null)}><section className="sheet"><div className="grab"/>
+    {shareIntake && <Sheet label="Send to" onClose={() => setShareIntake(null)}>
       <h2>Send to…</h2>
       <p className="sheet-sub">{shareIntake.files.length ? `${shareIntake.files.length} file${shareIntake.files.length > 1 ? "s" : ""} to share` : "Shared text"}</p>
       {sorted.map(c => <button key={c.id} className="member" onClick={() => void deliverShare(c)}>
         <ConversationAvatar c={c} self={identity.deviceId}/><span><strong>{c.title}</strong><small>{c.kind === "group" ? `${c.members.length} of you` : "Private chat"}</small></span>
       </button>)}
-    </section></div>}
+    </Sheet>}
 
-    {panel !== "none" && panel !== "doodle" && <div className="scrim" onMouseDown={e => e.target === e.currentTarget && setPanel("none")}><section className="sheet"><div className="grab"/>
+    {panel !== "none" && panel !== "doodle" && <Sheet label={PANEL_LABELS[panel]} onClose={() => setPanel("none")}>
       {panel === "attach" && active && <>
         <h2>Send something fun</h2>
         <div className="attach-grid">
@@ -878,7 +884,10 @@ export default function App() {
         <button className="setting" onClick={() => setPanel("join")}><span>🔗</span>Join with a code</button>
         <small className="privacy">🔒 End-to-end encrypted · the relay only holds scrambled messages, and only for 7 days · photos & doodles live safely on your devices</small>
       </>}
-    </section></div>}
+    </Sheet>}
+    {/* Toasts are the only channel for a failed send or a key-change warning, and a screen
+        reader was never told about any of them. */}
+    <div className="toast-live" role="status" aria-live="polite">{toast}</div>
     {toast && <div className="toast">{toast}</div>}
   </div>;
 }

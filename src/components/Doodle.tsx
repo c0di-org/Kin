@@ -19,6 +19,12 @@ export default function Doodle({ onSend, onClose }: { onSend(blob: Blob): void; 
   tool.current = { color, size, eraser };
 
   useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => { if (e.key === "Escape") onClose(); };
+    addEventListener("keydown", onKey);
+    return () => removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  useEffect(() => {
     const canvas = canvasRef.current!;
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const rect = canvas.getBoundingClientRect();
@@ -90,7 +96,7 @@ export default function Doodle({ onSend, onClose }: { onSend(blob: Blob): void; 
     canvasRef.current!.toBlob(blob => { if (blob) onSend(blob); }, "image/png");
   };
 
-  return <div className="doodle">
+  return <div className="doodle" role="dialog" aria-modal="true" aria-label="Doodle">
     <Aurora/>
     <header className="doodle-bar">
       <button className="round doodle-close" onClick={onClose} aria-label="Close doodle">
