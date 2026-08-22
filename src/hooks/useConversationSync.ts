@@ -92,7 +92,8 @@ export function useConversationSync({ identity, conversations, activeId, online,
     const conv = (await listConversations()).find(c => c.id === conversationId);
     if (conv?.kind !== "group") return;
     try {
-      const { conversation, refused } = applyRoster(conv, await roomMembers(me, conversationId));
+      const roster = await roomMembers(me, conversationId);
+      const { conversation, refused } = applyRoster(conv, roster, { authoritative: true });
       refused.forEach(m => eventsRef.current.onKeyChange(m));
       await putConversation(conversation);
       eventsRef.current.onConversationsChanged();
@@ -102,11 +103,12 @@ export function useConversationSync({ identity, conversations, activeId, online,
   async function handleFrame(conversationId: string, raw: string): Promise<void> {
     const me = identityRef.current;
     if (!me) return;
-    let frame: { kind?: string; member?: PublicMember; senderDeviceId?: string; active?: boolean; messageId?: string };
+    let frame: { kind?: string; member?: PublicMember; senderDeviceId?: string; active?: boolean; messageId?: string; deviceId?: string };
     try { frame = JSON.parse(raw); } catch { return; }
 
     if (frame.kind === "message") return void await ingestOne(conversationId, frame as unknown as CipherEnvelope);
     if (frame.kind === "member" && frame.member) return void await applyMember(me, conversationId, frame.member);
+    if (frame.kind === "member-removed" && frame.deviceId) return void await applyRemoval(me, conversationId, frame.deviceId);
     if (frame.kind === "typing" && frame.senderDeviceId && frame.senderDeviceId !== me.deviceId) {
       eventsRef.current.onTyping(conversationId, frame.senderDeviceId, !!frame.active);
     }
@@ -124,6 +126,26 @@ export function useConversationSync({ identity, conversations, activeId, online,
     // but not on the strength of an update we just refused.
     const peerRenamed = conv.kind === "direct" && member.deviceId !== me.deviceId && !refused.length;
     await putConversation({ ...conversation, ...(peerRenamed ? { title: member.displayName } : {}) });
+    eventsRef.current.onConversationsChanged();
+  }
+
+  /**
+   * Somebody was removed from the room — an old phone, or the person leaving themselves.
+   *
+   * Being removed ourselves is not handled here on purpose. The relay stops answering for us the
+   * moment it happens, so the socket closes and reconnects fail; deleting our own copy of the
+   * conversation off the back of a frame would mean any relay that felt like it could erase a
+   * family's history from a device. What we hold locally stays ours.
+   */
+  async function applyRemoval(me: LocalIdentity, conversationId: string, deviceId: string): Promise<void> {
+    if (deviceId === me.deviceId) return;
+    const conv = (await listConversations()).find(c => c.id === conversationId);
+    if (!conv || conv.kind !== "group") return;
+    await putConversation({
+      ...conv,
+      members: conv.members.filter(m => m.deviceId !== deviceId),
+      keyAlerts: conv.keyAlerts?.filter(id => id !== deviceId)
+    });
     eventsRef.current.onConversationsChanged();
   }
 

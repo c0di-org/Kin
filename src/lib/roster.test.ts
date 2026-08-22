@@ -63,4 +63,30 @@ describe("applyRoster", () => {
     const second = applyRoster(first.conversation, [{ ...bob, displayName: "Bobby" }]);
     expect(second.conversation.keyAlerts).toEqual(["a"]);
   });
+
+  it("keeps everyone when a single member card arrives over the socket", () => {
+    // One card is not a statement about who else is in the room.
+    const { conversation } = applyRoster(conv, [{ ...bob, displayName: "Bobby" }]);
+    expect(conversation.members.map(m => m.deviceId).sort()).toEqual(["a", "b"]);
+  });
+
+  it("drops whoever a full roster pull no longer lists", () => {
+    // How a device that was offline when somebody was removed ever finds out.
+    const { conversation } = applyRoster(conv, [alice], { authoritative: true });
+    expect(conversation.members.map(m => m.deviceId)).toEqual(["a"]);
+  });
+
+  it("keeps a member under a key warning even when the relay stops listing them", () => {
+    // Otherwise a relay that wanted the warning gone could simply drop them from the roster.
+    const warned = applyRoster(conv, [{ ...bob, signPublicJwk: alice.signPublicJwk }]).conversation;
+    expect(warned.keyAlerts).toEqual(["b"]);
+    const { conversation } = applyRoster(warned, [alice], { authoritative: true });
+    expect(conversation.members.map(m => m.deviceId).sort()).toEqual(["a", "b"]);
+  });
+
+  it("leaves a direct chat's two members alone", () => {
+    const direct: Conversation = { ...conv, kind: "direct" };
+    const { conversation } = applyRoster(direct, [alice], { authoritative: true });
+    expect(conversation.members.map(m => m.deviceId).sort()).toEqual(["a", "b"]);
+  });
 });

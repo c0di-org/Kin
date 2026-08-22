@@ -1,9 +1,9 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, wrapConversationKey } from "./lib/crypto";
-import { deleteMessage, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage } from "./lib/db";
+import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage, undismissDirect } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
-import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
+import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
 import { deletedIds, firstName, mergeMessages, previewOf, redact } from "./lib/ingest";
@@ -27,7 +27,7 @@ const MAX_FILE = 25 * 1024 * 1024;
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
 const PANEL_LABELS: Record<Panel, string> = {
   none: "", doodle: "Doodle", pair: "Add a family member", join: "Join a family",
-  members: "Family members", settings: "Settings", attach: "Send something",
+  members: "Chat details", settings: "Settings", attach: "Send something",
   add: "Bring people in", profile: "Your look"
 };
 
@@ -55,6 +55,10 @@ export default function App() {
   const [shareIntake, setShareIntake] = useState<{ files: File[]; text: string } | null>(null);
   const [recent, setRecent] = useState<Record<string, ChatMessage[]>>({});
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  // Destructive actions confirm in place. A second sheet over the first would have to argue with
+  // the first one over focus and inert, for a question that fits on one line.
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const identityRef = useRef<LocalIdentity | null>(identity);
   const activeIdRef = useRef<string | null>(activeId);
@@ -236,6 +240,7 @@ export default function App() {
     try {
       const convs = await listConversations();
       const known = new Set(convs.map(c => c.id));
+      const dismissed = await dismissedDirects();
       const peers = new Map<string, PublicMember>();
       for (const c of convs) for (const m of c.members) if (m.deviceId !== me.deviceId) peers.set(m.deviceId, m);
       const now = Date.now();
@@ -251,6 +256,12 @@ export default function App() {
         if (pushStatusRef.current === "on") void registerPushForRooms(me, [direct.id]).catch(() => { /* next sweep */ });
         if (!envelopes.length) continue;
         const stamps = envelopes.map(e => e.createdAt);
+        // A chat we deleted comes back only if they have said something since.
+        const dismissedAt = dismissed[direct.id];
+        if (dismissedAt !== undefined) {
+          if (Math.max(...stamps) <= dismissedAt) continue;
+          await undismissDirect(direct.id);
+        }
         await putConversation({
           id: direct.id, kind: "direct", title: peer.displayName, key: direct.key,
           members: [publicMember(me), peer],
@@ -288,7 +299,7 @@ export default function App() {
       setMessages(x => ({ ...x, [activeId]: cached }));
       await markRead(activeId);
     })();
-    setTyping([]); setReactFor(null); setReplyTo(null);
+    setTyping([]); setReactFor(null); setReplyTo(null); setConfirming(null);
     const onVisible = () => { if (!document.hidden && activeIdRef.current === activeId) void markRead(activeId); };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
@@ -597,10 +608,56 @@ export default function App() {
     } catch { flash("Couldn’t start pairing — are you online?"); }
   }
 
+  /**
+   * Take this conversation off this device.
+   *
+   * For a family that also means telling the relay, so the rest of them stop seeing us listed and
+   * we stop receiving. A direct chat has no roster to leave — deleting it is local, and the other
+   * person messaging again simply starts it over.
+   */
+  async function leaveConversation(conv: Conversation): Promise<void> {
+    const me = identityRef.current; if (!me || busy) return;
+    setBusy(true);
+    try {
+      if (conv.kind === "group") {
+        try { await removeRoomMember(me, conv.id, me.deviceId); }
+        catch { setBusy(false); return flash("Couldn’t leave — are you online?"); }
+      } else {
+        // Otherwise the sweep below re-derives this room within thirty seconds and pulls it back.
+        await dismissDirect(conv.id);
+      }
+      await deleteConversation(conv.id);
+      setMessages(x => { const { [conv.id]: _gone, ...rest } = x; return rest; });
+      setActiveId(null); setPanel("none"); setConfirming(null);
+      await refresh();
+      flash(conv.kind === "group" ? `You left ${conv.title}` : "Chat deleted");
+    } finally { setBusy(false); }
+  }
+
+  /** Evict somebody else's device — an old phone, or one that was replaced. */
+  async function removeMember(conv: Conversation, member: PublicMember): Promise<void> {
+    const me = identityRef.current; if (!me || busy) return;
+    setBusy(true);
+    try {
+      await removeRoomMember(me, conv.id, member.deviceId);
+      const current = (await listConversations()).find(c => c.id === conv.id) ?? conv;
+      await putConversation({
+        ...current,
+        members: current.members.filter(m => m.deviceId !== member.deviceId),
+        keyAlerts: current.keyAlerts?.filter(id => id !== member.deviceId)
+      });
+      await refresh();
+      setConfirming(null);
+      flash(`${firstName(member.displayName)} was removed`);
+    } catch { flash("Couldn’t remove them — are you online?"); }
+    finally { setBusy(false); }
+  }
+
   async function privateChat(peer: PublicMember): Promise<void> {
     if (!identity) return;
     const d = await directWith(identity, peer);
     const existing = (await listConversations()).find(c => c.id === d.id);
+    await undismissDirect(d.id);
     setPanel("none");
     if (existing) return setActiveId(existing.id); // don't clobber the history we already have
     const c: Conversation = { id: d.id, kind: "direct", title: peer.displayName, key: d.key, members: [publicMember(identity), peer], createdAt: Date.now() };
@@ -742,7 +799,7 @@ export default function App() {
           <button className="back" onClick={() => setActiveId(null)} aria-label="Back">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 4.5 8 12l7.5 7.5"/></svg>
           </button>
-          <button className="chat-person" onClick={() => active.kind === "group" && setPanel("members")}>
+          <button className="chat-person" onClick={() => { setConfirming(null); setPanel("members"); }}>
             <ConversationAvatar c={active} self={identity.deviceId} small/>
             <span>
               <strong>{active.kind === "group" ? `${active.title} 🏡` : active.title}</strong>
@@ -858,18 +915,57 @@ export default function App() {
         <input className="code-input" autoFocus placeholder="Invite code" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())} onKeyDown={e => e.key === "Enter" && void joinFamily(undefined, undefined, joinCode)}/>
         <button className="primary" onClick={() => void joinFamily(undefined, undefined, joinCode)}>Join 🎉</button>
       </>}
-      {panel === "members" && active && <>
+      {panel === "members" && active && (active.kind === "group" ? <>
         <div className="sheet-title"><h2>{active.title} 🏡</h2><button onClick={() => void startPairing()} aria-label="Invite">💌</button></div>
         {active.members.map(m => {
           const alerted = active.keyAlerts?.includes(m.deviceId);
-          return <button className={`member${alerted ? " member-alert" : ""}`} key={m.deviceId} disabled={m.deviceId === identity.deviceId} onClick={() => void privateChat(m)}>
-            <Avatar member={m}/><span>
-              <strong>{alerted ? "⚠️ " : ""}{m.displayName}{m.deviceId === identity.deviceId ? " · you" : ""}</strong>
-              <small>{alerted ? "Security keys changed — check with them in person" : m.deviceId === identity.deviceId ? "This device" : "Tap for a private chat"}</small>
-            </span>
-          </button>;
+          const me = m.deviceId === identity.deviceId;
+          return <div className="member-row" key={m.deviceId}>
+            <button className={`member${alerted ? " member-alert" : ""}`} disabled={me} onClick={() => void privateChat(m)}>
+              <Avatar member={m}/><span>
+                <strong>{alerted ? "⚠️ " : ""}{m.displayName}{me ? " · you" : ""}</strong>
+                <small>{alerted ? "Security keys changed — check with them in person" : me ? "This device" : "Tap for a private chat"}</small>
+              </span>
+            </button>
+            {!me && <button className="member-remove" aria-label={`Remove ${m.displayName}`}
+              onClick={() => setConfirming(x => x === `member:${m.deviceId}` ? null : `member:${m.deviceId}`)}>✕</button>}
+            {confirming === `member:${m.deviceId}` && <div className="confirm">
+              <p><b>Remove {firstName(m.displayName)}?</b> They stop getting new messages here. The ones already on their phone stay there — Kin can’t reach into a device it has lost touch with.</p>
+              <div className="confirm-actions">
+                <button className="chip-btn" onClick={() => setConfirming(null)}>Keep them</button>
+                <button className="danger-btn" disabled={busy} onClick={() => void removeMember(active, m)}>Remove</button>
+              </div>
+            </div>}
+          </div>;
         })}
-      </>}
+        <div className="sheet-foot">
+          <button className="danger-row" onClick={() => setConfirming(x => x === "leave" ? null : "leave")}>
+            <span>🚪</span>Leave this family
+          </button>
+          {confirming === "leave" && <div className="confirm">
+            <p><b>Leave {active.title}?</b> This family and everything in it goes off this device, and the others stop seeing you here. You’d need a fresh invite to come back.</p>
+            <div className="confirm-actions">
+              <button className="chip-btn" onClick={() => setConfirming(null)}>Stay</button>
+              <button className="danger-btn" disabled={busy} onClick={() => void leaveConversation(active)}>Leave</button>
+            </div>
+          </div>}
+        </div>
+      </> : <>
+        <h2>{active.title}</h2>
+        <p className="sheet-sub">Just the two of you · end-to-end encrypted</p>
+        <div className="sheet-foot">
+          <button className="danger-row" onClick={() => setConfirming(x => x === "leave" ? null : "leave")}>
+            <span>🗑</span>Delete this chat
+          </button>
+          {confirming === "leave" && <div className="confirm">
+            <p><b>Delete this chat?</b> Every message and photo in it goes off this device. {firstName(active.title)} keeps their own copy, and messaging you again starts a new one.</p>
+            <div className="confirm-actions">
+              <button className="chip-btn" onClick={() => setConfirming(null)}>Keep it</button>
+              <button className="danger-btn" disabled={busy} onClick={() => void leaveConversation(active)}>Delete</button>
+            </div>
+          </div>}
+        </div>
+      </>)}
       {panel === "profile" && <ProfileEditor identity={identity} onCancel={() => setPanel("settings")} onSave={(n, a) => void saveProfile(n, a)}/>}
       {panel === "settings" && <>
         <button className="profile" onClick={() => setPanel("profile")}>

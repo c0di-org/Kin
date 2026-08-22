@@ -28,6 +28,11 @@ export async function addRoomMember(identity: LocalIdentity, roomId: string, mem
   const path = `/api/rooms/${encodeURIComponent(roomId)}/members`;
   await signedJson(identity, "POST", path, member);
 }
+/** Evict a device from a room. Removing yourself is how leaving a family works. */
+export async function removeRoomMember(identity: LocalIdentity, roomId: string, deviceId: string): Promise<void> {
+  const path = `/api/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(deviceId)}`;
+  await signedJson(identity, "DELETE", path);
+}
 export async function history(identity: LocalIdentity, roomId: string): Promise<CipherEnvelope[]> {
   const path = `/api/rooms/${encodeURIComponent(roomId)}/history`;
   return signedJson(identity, "GET", path);

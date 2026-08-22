@@ -32,12 +32,27 @@ export function mergeMembers(known: PublicMember[], incoming: PublicMember[]): {
   return { members: [...byId.values()], refused };
 }
 
-/** Merge a roster into a conversation, carrying forward any standing key warnings. */
-export function applyRoster(conv: Conversation, incoming: PublicMember[]): { conversation: Conversation; refused: PublicMember[] } {
+/**
+ * Merge a roster into a conversation, carrying forward any standing key warnings.
+ *
+ * `authoritative` marks a full roster pull rather than a single member card arriving over the
+ * socket: it is the complete list, so anyone missing from it has been removed, and a device that
+ * was offline when that happened has no other way to find out. A member whose keys we refused is
+ * kept regardless — dropping them would quietly retire the warning about them.
+ */
+export function applyRoster(
+  conv: Conversation,
+  incoming: PublicMember[],
+  { authoritative = false }: { authoritative?: boolean } = {}
+): { conversation: Conversation; refused: PublicMember[] } {
   const { members, refused } = mergeMembers(conv.members, incoming);
   const alerts = new Set([...(conv.keyAlerts ?? []), ...refused.map(m => m.deviceId)]);
+  const listed = new Set(incoming.map(m => m.deviceId));
+  const kept = authoritative && conv.kind === "group"
+    ? members.filter(m => listed.has(m.deviceId) || alerts.has(m.deviceId))
+    : members;
   return {
-    conversation: { ...conv, members, ...(alerts.size ? { keyAlerts: [...alerts] } : {}) },
+    conversation: { ...conv, members: kept, ...(alerts.size ? { keyAlerts: [...alerts] } : {}) },
     refused
   };
 }

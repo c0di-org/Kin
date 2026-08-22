@@ -222,3 +222,49 @@ describe("envelopes", () => {
     expect((await post(await signEnvelope(f.mallory, { ...base, id: crypto.randomUUID() }))).status).toBe(401);
   });
 });
+
+describe("removing a member", () => {
+  it("evicts the device and its push subscription", async () => {
+    await f.seed();
+    await f.storage.put(`push:${f.bob.deviceId}`, { endpoint: "https://push.test/1", keys: { p256dh: "p", auth: "a" } });
+    const res = await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.bob.deviceId}`)));
+    expect(res.status).toBe(200);
+    expect(await f.storage.get(`member:${f.bob.deviceId}`)).toBeUndefined();
+    expect(await f.storage.get(`push:${f.bob.deviceId}`)).toBeUndefined();
+  });
+
+  it("stops the removed device reaching the room at all", async () => {
+    await f.seed();
+    await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.bob.deviceId}`)));
+    expect((await f.room.fetch(await signedRequest(f.bob, "GET", url("/history")))).status).toBe(401);
+    expect((await f.room.fetch(await signedRequest(f.bob, "GET", url("/members")))).status).toBe(401);
+  });
+
+  it("lets a member remove themselves, which is how leaving works", async () => {
+    await f.seed();
+    const res = await f.room.fetch(await signedRequest(f.bob, "DELETE", url(`/members/${f.bob.deviceId}`)));
+    expect(res.status).toBe(200);
+    expect(await f.storage.get(`member:${f.bob.deviceId}`)).toBeUndefined();
+  });
+
+  it("refuses a request from someone who is not in the room", async () => {
+    await f.seed();
+    const res = await f.room.fetch(await signedRequest(f.mallory, "DELETE", url(`/members/${f.alice.deviceId}`)));
+    expect(res.status).toBe(401);
+    expect(await f.storage.get(`member:${f.alice.deviceId}`)).toBeDefined();
+  });
+
+  it("keeps the last member, so the room cannot be orphaned", async () => {
+    await f.seed();
+    await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.bob.deviceId}`)));
+    const res = await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.alice.deviceId}`)));
+    expect(res.status).toBe(409);
+    expect(await f.storage.get(`member:${f.alice.deviceId}`)).toBeDefined();
+  });
+
+  it("is idempotent for a device that has already gone", async () => {
+    await f.seed();
+    await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.bob.deviceId}`)));
+    expect((await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.bob.deviceId}`)))).status).toBe(200);
+  });
+});

@@ -161,6 +161,42 @@ export async function markOwnMessagesRead(conversationId: string, deviceId: stri
   return updated;
 }
 
+/**
+ * Forget a conversation completely: its row, its messages, and the attachment bytes only it was
+ * holding. Leaving the blobs behind would keep the photos from a chat the user just deleted
+ * sitting on the device indefinitely, which is not what deleting a chat means.
+ */
+/**
+ * Direct chats we have deleted, and when.
+ *
+ * A direct room id is derived from the two device keys, so the discovery sweep finds it again
+ * within thirty seconds of it being deleted and pulls the whole history back. The timestamp is
+ * what keeps "delete" and "they can always message me again" from contradicting each other:
+ * anything older than it stays gone, anything newer brings the chat back.
+ */
+export async function dismissedDirects(): Promise<Record<string, number>> {
+  return (await read<Record<string, number>>("meta", s => s.get("dismissedDirects"))) ?? {};
+}
+export async function dismissDirect(conversationId: string, at = Date.now()): Promise<void> {
+  const current = await dismissedDirects();
+  return write("meta", s => { s.put({ ...current, [conversationId]: at }, "dismissedDirects"); });
+}
+export async function undismissDirect(conversationId: string): Promise<void> {
+  const { [conversationId]: _gone, ...rest } = await dismissedDirects();
+  return write("meta", s => { s.put(rest, "dismissedDirects"); });
+}
+
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const messages = await listMessages(conversationId, Number.MAX_SAFE_INTEGER);
+  const fileIds = messages.flatMap(m => m.payload.attachment ? [m.payload.attachment.fileId] : []);
+  const conn = await db();
+  const tx = conn.transaction(["conversations", "messages", "blobs"], "readwrite");
+  tx.objectStore("conversations").delete(conversationId);
+  for (const m of messages) tx.objectStore("messages").delete(m.id);
+  for (const id of fileIds) tx.objectStore("blobs").delete(id);
+  return committed(tx);
+}
+
 export async function deleteMessage(id: string): Promise<void> {
   return write("messages", s => { s.delete(id); });
 }

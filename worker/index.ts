@@ -384,6 +384,30 @@ export class ConversationRoom extends DurableObject<Env> {
     return json({ ok: true });
   }
 
+  /**
+   * Drop a member from the room.
+   *
+   * Any member may remove any member, which is the same trust Kin already extends for adding one
+   * — pairing lets any member introduce anybody, and a family has no admin to appeal to. What it
+   * buys is the case this exists for: a phone that was lost, replaced or handed on, whose device
+   * is still listed and still receiving.
+   *
+   * Removal is a relay-side eviction, not a key rotation. It cuts the device off from history,
+   * from the socket and from posting, but the conversation key it already holds is unchanged, so
+   * it keeps whatever it had already received. The UI says so rather than implying otherwise.
+   */
+  private async removeMember(requester: Member, deviceId: string): Promise<Response> {
+    const target = await this.member(deviceId);
+    if (!target) return json({ ok: true });
+    const members = await this.allMembers();
+    // Emptying the room would leave a meta record nobody can ever authenticate against again,
+    // and every request to it answering 401 forever.
+    if (members.length <= 1) return error("A room keeps its last member", 409);
+    await this.ctx.storage.delete([`member:${deviceId}`, `push:${deviceId}`]);
+    this.broadcast({ kind: "member-removed", deviceId, byDeviceId: requester.deviceId });
+    return json({ ok: true });
+  }
+
   private async listHistory(): Promise<Response> {
     // Keys are msg:<zero-padded createdAt>:<id> and DO list is ascending, so an unqualified
     // limit hands back the *oldest* 400 — past 400 live envelopes a reconnecting client would
@@ -501,6 +525,12 @@ export class ConversationRoom extends DurableObject<Env> {
       const signed = await this.verifySignedRequest(request);
       if (!signed) return error("Unauthorized", 401);
       return this.putMember(signed.member, signed.body);
+    }
+    const memberMatch = tail.match(/^\/members\/([A-Za-z0-9_-]+)$/);
+    if (memberMatch && request.method === "DELETE") {
+      const signed = await this.verifySignedRequest(request);
+      if (!signed) return error("Unauthorized", 401);
+      return this.removeMember(signed.member, memberMatch[1]);
     }
     if (tail === "/history" && request.method === "GET") {
       if (!(await this.verifySignedRequest(request))) return error("Unauthorized", 401);
