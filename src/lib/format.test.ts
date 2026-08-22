@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayLabel, emojiOnly, greeting, hue, initials, seedEmoji } from "./format";
+import { PERSON_COLOURS, dayLabel, emojiOnly, greeting, initials, personColour, personIndex, seedEmoji } from "./format";
 
 describe("initials", () => {
   it("takes the first letter of the first two words", () => expect(initials("Sam Holland")).toBe("SH"));
@@ -9,13 +9,34 @@ describe("initials", () => {
   it("falls back to a dot for an empty name", () => expect(initials("   ")).toBe("•"));
 });
 
-describe("hue", () => {
-  it("is stable for the same seed", () => expect(hue("abc")).toBe(hue("abc")));
-  it("stays inside the colour wheel", () => {
-    for (const s of ["", "a", "a very long avatar seed indeed", "🦊"]) {
-      expect(hue(s)).toBeGreaterThanOrEqual(0);
-      expect(hue(s)).toBeLessThan(360);
+describe("personIndex", () => {
+  const ANIMALS = ["🦊", "🐻", "🐰", "🐸", "🦁", "🐼", "🐨", "🦄", "🐯", "🐙", "🦉", "🐢", "🐬", "🦋", "🐞", "🦕"];
+
+  it("is stable for the same id", () => expect(personIndex("abc")).toBe(personIndex("abc")));
+
+  it("stays inside the palette", () => {
+    for (const s of ["", "a", "a very long device id indeed", "🦊"]) {
+      expect(personIndex(s)).toBeGreaterThanOrEqual(0);
+      expect(personIndex(s)).toBeLessThan(PERSON_COLOURS);
     }
+  });
+
+  it("spreads ids that differ only in their last character", () => {
+    // The old hash put all of these within one of each other, which is how every avatar in the
+    // app ended up the same green.
+    const seen = new Set([..."abcdefghijkl"].map(c => personIndex(`device-${c}`)));
+    expect(seen.size).toBeGreaterThan(6);
+  });
+
+  it("no longer collapses the animal seeds onto one colour", () => {
+    // Kept as a regression: these are the exact strings that used to hash to hue 136 or 137.
+    const seen = new Set(ANIMALS.map(a => personIndex(`e:${a}`)));
+    expect(seen.size).toBeGreaterThan(6);
+  });
+
+  it("hands back the custom properties for that index", () => {
+    const i = personIndex("device-1");
+    expect(personColour("device-1")).toEqual({ bg: `var(--p${i}-bg)`, name: `var(--p${i}-name)` });
   });
 });
 

@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import type { AttachmentPayload, ChatMessage, Conversation, LocalIdentity } from "../lib/types";
-import { emojiOnly, hue, time } from "../lib/format";
+import { emojiOnly, personColour, time } from "../lib/format";
 import { firstName } from "../lib/ingest";
 import { mediaKind, saveToDevice } from "../lib/media";
 import { buzz } from "../lib/sound";
@@ -50,7 +50,7 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, onReactB
         onPointerDown={startPress} onPointerUp={endPress} onPointerLeave={endPress} onPointerCancel={endPress}
         onContextMenu={e => { e.preventDefault(); onReactBar(); }}
         onClick={() => { if (m.status === "failed") onRetry(); }}>
-        {showName && sender && <small className="sender" style={{ color: `hsl(${hue(sender.avatarSeed)} 55% var(--name-l))` }}>{firstName(sender.displayName)}</small>}
+        {showName && sender && <small className="sender" style={{ color: personColour(sender.deviceId).name }}>{firstName(sender.displayName)}</small>}
         {m.payload.type === "text" && <span className="text">{m.payload.text}</span>}
         {m.payload.type === "file" && m.payload.attachment && <MediaBody att={m.payload.attachment} identity={identity} c={c} onOpenMedia={onOpenMedia}/>}
         <small className="stamp">{time(m.createdAt)}{mine && <b className={`tick ${m.status ?? ""}`}>{m.status === "failed" ? " ⚠ tap to retry" : m.status === "sending" ? " ◌" : m.status === "read" ? " ✓✓" : " ✓"}</b>}</small>

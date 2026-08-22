@@ -45,8 +45,24 @@
   /* 4.6:1 on --paper at 13px, which is the smallest thing that uses it. */
   --sub: #5b5885;
   --mine-ink: #fff;
-  --avatar-l: 78%;
-  --name-l: 46%;
+
+  /* ---------- people ----------
+     Twelve hues, each with a lightness solved per hue so that every name clears 4.5:1 on
+     --paper and every avatar clears it against the initials drawn on top. A single lightness
+     cannot do this: at L=52% a blue name is 4.9:1 and a yellow one is 1.9:1. lib/format.ts
+     picks the index from the deviceId. */
+  --p0-name: #d63429; --p0-bg: #eba7a2;
+  --p1-name: #ab5d21; --p1-bg: #ebc2a2;
+  --p2-name: #896b1a; --p2-bg: #ebd8a2;
+  --p3-name: #517c18; --p3-bg: #cceba2;
+  --p4-name: #18813b; --p4-bg: #a2ebbb;
+  --p5-name: #187c6f; --p5-bg: #a2ebe2;
+  --p6-name: #1d799a; --p6-bg: #a2d8eb;
+  --p7-name: #3169d8; --p7-bg: #a2bbeb;
+  --p8-name: #4d31d8; --p8-bg: #afa2eb;
+  --p9-name: #9b31d8; --p9-bg: #d1a2eb;
+  --p10-name: #c526b5; --p10-bg: #eba2e4;
+  --p11-name: #d22872; --p11-bg: #eba2c2;
 
   /* accents */
   --accent: #7c6cff;
@@ -783,8 +799,18 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
     --glass-line: rgba(255, 255, 255, .16);
     --line: rgba(255, 255, 255, .1);
     --tint: rgba(160, 148, 255, .16);
-    --avatar-l: 34%;
-    --name-l: 74%;
+    --p0-name: #e2635a; --p0-bg: #8b2a23;
+    --p1-name: #e08f52; --p1-bg: #8b5023;
+    --p2-name: #e0ba52; --p2-bg: #836821;
+    --p3-name: #a3e052; --p3-bg: #50761e;
+    --p4-name: #52e081; --p4-bg: #1f7a3d;
+    --p5-name: #52e0cd; --p5-bg: #1e766a;
+    --p6-name: #52bae0; --p6-bg: #236f8b;
+    --p7-name: #5f8be3; --p7-bg: #23458b;
+    --p8-name: #8f7de8; --p8-bg: #34238b;
+    --p9-name: #b86ce5; --p9-bg: #65238b;
+    --p10-name: #e052d2; --p10-bg: #8b2380;
+    --p11-name: #e25a95; --p11-bg: #8b2350;
     --shadow: 0 8px 22px rgba(0, 0, 0, .38);
     --shadow-big: 0 28px 64px rgba(0, 0, 0, .55);
     --glow: 0 12px 30px rgba(124, 108, 255, .45);

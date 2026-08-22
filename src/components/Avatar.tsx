@@ -1,10 +1,11 @@
 import type { Conversation, PublicMember } from "../lib/types";
-import { hue, initials, seedEmoji } from "../lib/format";
+import { initials, personColour, seedEmoji } from "../lib/format";
 
 /** A person, as a coloured circle holding either their chosen animal or their initials. */
 export function Avatar({ member, size = 44 }: { member: PublicMember; size?: number }) {
   const emoji = seedEmoji(member.avatarSeed);
-  return <span className="avatar" style={{ width: size, height: size, fontSize: emoji ? size * 0.56 : size * 0.36, background: `hsl(${hue(member.avatarSeed)} 65% var(--avatar-l))` }}>
+  // Keyed on the device, not the animal: two people who both picked the fox still read apart.
+  return <span className="avatar" style={{ width: size, height: size, fontSize: emoji ? size * 0.56 : size * 0.36, background: personColour(member.deviceId).bg }}>
     {emoji ?? initials(member.displayName)}
   </span>;
 }
