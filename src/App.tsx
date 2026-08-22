@@ -702,6 +702,7 @@ export default function App() {
               <Bubble m={m} prev={newDay ? undefined : prev} me={identity.deviceId} identity={identity} c={active}
                 reactions={reactions.get(m.id)}
                 reacting={reactFor === m.id}
+                last={i === visible.length - 1}
                 onReactBar={() => setReactFor(x => x === m.id ? null : m.id)}
                 onReact={(emoji, at) => void react(m, emoji, at)}
                 onOpenMedia={(att, url) => setLightbox({ att, url })}

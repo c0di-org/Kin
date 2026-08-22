@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { AttachmentPayload, ChatMessage, Conversation, LocalIdentity } from "../lib/types";
 import { emojiOnly, personColour, time } from "../lib/format";
 import { firstName } from "../lib/ingest";
@@ -20,9 +20,9 @@ function MediaBody({ att, identity, c, onOpenMedia }: { att: AttachmentPayload; 
 }
 
 /** One message: its text or media, who sent it, when, its delivery state and its reactions. */
-export function Bubble({ m, prev, me, identity, c, reactions, reacting, onReactBar, onReact, onOpenMedia, onRetry }: {
+export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, onReactBar, onReact, onOpenMedia, onRetry }: {
   m: ChatMessage; prev?: ChatMessage; me: string; identity: LocalIdentity; c: Conversation;
-  reactions?: Record<string, string[]>; reacting: boolean;
+  reactions?: Record<string, string[]>; reacting: boolean; last: boolean;
   onReactBar(): void; onReact(emoji: string, at?: { x: number; y: number }): void;
   onOpenMedia(att: AttachmentPayload, url: string): void; onRetry(): void;
 }) {
@@ -31,6 +31,17 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, onReactB
   const grouped = !!prev && prev.senderDeviceId === m.senderDeviceId && m.createdAt - prev.createdAt < 5 * 60_000;
   const showName = c.kind === "group" && !mine && !grouped;
   const press = useRef<number | null>(null);
+  const bubble = useRef<HTMLDivElement>(null);
+  // The bar opens above the message, where for the topmost message on screen there is nothing to
+  // open into — it would sit off the top of the list, or over the header.
+  const [below, setBelow] = useState(false);
+  useLayoutEffect(() => {
+    if (!reacting) return;
+    const el = bubble.current;
+    const list = el?.closest(".messages");
+    if (!el || !list) return;
+    setBelow(el.getBoundingClientRect().top - list.getBoundingClientRect().top < 66);
+  }, [reacting]);
   const chips = Object.entries(reactions ?? {}).filter(([, who]) => who.length > 0);
   const big = m.payload.type === "text" && !!m.payload.text && emojiOnly(m.payload.text);
 
@@ -43,10 +54,10 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, onReactB
   return <div className={`row ${mine ? "mine" : "theirs"} ${grouped ? "grouped" : ""}`}>
     {c.kind === "group" && !mine && <span className="row-avatar">{!grouped && sender && <Avatar member={sender} size={30}/>}</span>}
     <div className="bubble-wrap" onClick={e => e.stopPropagation()}>
-      {reacting && <div className="react-bar">
+      {reacting && <div className={`react-bar ${below ? "below" : ""}`}>
         {REACTIONS.map(r => <button key={r} onClick={e => onReact(r, { x: e.clientX, y: e.clientY })}>{r}</button>)}
       </div>}
-      <div className={`bubble ${big ? "big-emoji" : ""} ${m.payload.type === "file" ? "media-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""}`}
+      <div ref={bubble} className={`bubble ${big ? "big-emoji" : ""} ${m.payload.type === "file" ? "media-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""} ${reacting ? "reacting" : ""}`}
         onPointerDown={startPress} onPointerUp={endPress} onPointerLeave={endPress} onPointerCancel={endPress}
         onContextMenu={e => { e.preventDefault(); onReactBar(); }}
         onClick={() => { if (m.status === "failed") onRetry(); }}>
@@ -58,7 +69,10 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, onReactB
       {chips.length > 0 && <div className={`chips ${mine ? "chips-mine" : ""}`}>
         {chips.map(([emoji, who]) => <button key={emoji} className={who.includes(me) ? "me" : ""} onClick={e => onReact(emoji, { x: e.clientX, y: e.clientY })}>{emoji}{who.length > 1 && <b>{who.length}</b>}</button>)}
       </div>}
-      <button className="react-hint" aria-label="React" onClick={onReactBar}>☺</button>
+      {/* On a phone the only way to react is a long press, and nothing anywhere says so. One of
+          these on the newest message teaches the gesture without pinning a button to every
+          bubble in the thread; on a pointer device it appears on hover as before. */}
+      <button className={`react-hint ${last ? "always" : ""}`} aria-label={`React to this message`} onClick={onReactBar}>☺</button>
     </div>
   </div>;
 }

@@ -415,13 +415,18 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   box-shadow: var(--shadow-big);
   animation: pop-in .2s cubic-bezier(.3, 1.7, .5, 1);
 }
+/* Opening downwards when there is no room above; the message being reacted to is the one thing
+   the bar has to stay attached to, so it never opens off the top of the list. */
+.react-bar.below { bottom: auto; top: 100%; margin-bottom: 0; margin-top: 8px; }
 .mine .react-bar { right: 0; }
+/* The bar overlays whatever is behind it, so the target says which message it belongs to. */
+.bubble.reacting { outline: 2.5px solid var(--accent); outline-offset: 3px; }
 .react-bar button { font-size: 25px; width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; transition: transform .16s cubic-bezier(.3, 1.6, .5, 1); }
 .react-bar button:hover { transform: scale(1.4) translateY(-3px); }
 .chips { display: flex; gap: 4px; margin: -9px 8px 4px; z-index: 3; flex-wrap: wrap; }
 .chips button {
   background: var(--glass-strong); border: 1px solid var(--glass-line); border-radius: 999px;
-  padding: 3px 9px; font-size: 14px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 3px;
+  padding: 5px 11px; min-height: 30px; font-size: 14px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 3px;
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   animation: pop-in .28s cubic-bezier(.3, 1.7, .5, 1); transition: transform .14s;
 }
@@ -436,7 +441,8 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 }
 .theirs .react-hint { left: calc(100% + 8px); }
 .mine .react-hint { right: calc(100% + 8px); }
-.bubble-wrap:hover .react-hint { opacity: 1; }
+.bubble-wrap:hover .react-hint, .react-hint.always { opacity: 1; }
+.react-hint.always { opacity: .72; }
 .react-hint:hover { transform: translateY(-50%) scale(1.22); }
 
 /* media inside bubbles */
@@ -778,7 +784,9 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   .back { display: grid; }
   .bubble-wrap { max-width: 84%; }
   .img-frame, .video-frame, span.img-gone { width: min(66vw, 300px); }
+  /* Hover cannot reveal anything on a touch screen, so only the standing hint survives. */
   .react-hint { display: none; }
+  .react-hint.always { display: grid; width: 34px; height: 34px; }
   .empty .mark { transform: scale(1.6); }
 }
 
