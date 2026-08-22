@@ -1,6 +1,6 @@
 import type { ChatMessage, Conversation } from "../lib/types";
 import { firstName, previewOf } from "../lib/ingest";
-import { time } from "../lib/format";
+import { listStamp } from "../lib/format";
 import { Avatar } from "./Avatar";
 
 /** The family's faces arranged in a ring around a house or envelope badge. */
@@ -51,7 +51,7 @@ export function FamilyCard({ c, self, active, recent, onOpen, onInvite }: {
       {recent.map(m => <span key={m.id} className="family-line">
         <b>{nameOf(m.senderDeviceId)}</b>
         <em>{previewOf(m.payload)}</em>
-        <time>{time(m.createdAt)}</time>
+        <time>{listStamp(m.createdAt)}</time>
       </span>)}
     </button>}
     {alone

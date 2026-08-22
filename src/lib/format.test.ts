@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PERSON_COLOURS, dayLabel, emojiOnly, greeting, initials, personColour, personIndex, seedEmoji } from "./format";
+import { PERSON_COLOURS, dayLabel, emojiOnly, greeting, initials, listStamp, personColour, personIndex, seedEmoji } from "./format";
 
 describe("initials", () => {
   it("takes the first letter of the first two words", () => expect(initials("Sam Holland")).toBe("SH"));
@@ -54,6 +54,30 @@ describe("dayLabel", () => {
     const firstOfMonth = new Date("2026-09-01T10:00:00");
     expect(dayLabel(new Date("2026-08-31T10:00:00").getTime(), firstOfMonth)).toBe("Yesterday");
   });
+  it("names the year once the message is from a different one", () => {
+    expect(dayLabel(new Date("2025-12-09T10:00:00").getTime(), now)).toMatch(/2025/);
+    expect(dayLabel(new Date("2026-08-14T09:00:00").getTime(), now)).not.toMatch(/2026/);
+  });
+});
+
+describe("listStamp", () => {
+  const now = new Date("2026-08-21T15:00:00");
+  const at = (iso: string) => listStamp(new Date(iso).getTime(), now);
+
+  it("shows the clock for today", () => expect(at("2026-08-21T09:05:00")).toMatch(/9[:.]05/));
+  it("says Yesterday rather than a time", () => expect(at("2026-08-20T23:59:00")).toBe("Yesterday"));
+  it("names the weekday inside the last week", () => expect(at("2026-08-17T09:00:00")).toMatch(/Mon/));
+  it("falls back to a date past a week", () => {
+    const older = at("2026-07-04T09:00:00");
+    expect(older).toMatch(/Jul/);
+    expect(older).not.toMatch(/2026/);
+  });
+  it("names the year for a different one", () => expect(at("2025-12-09T10:00:00")).toMatch(/2025/));
+  it("does not read as today for anything older", () => {
+    // The whole bug: a five-day-old message rendered "4:23 PM" in the conversation list.
+    expect(at("2026-08-16T16:23:00")).not.toMatch(/23/);
+  });
+  it("treats a clock skewed into the future as now", () => expect(at("2026-08-21T23:00:00")).toMatch(/11|23/));
 });
 
 describe("emojiOnly", () => {

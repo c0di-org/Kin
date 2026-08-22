@@ -7,7 +7,7 @@ import { addRoomMember, claimPair, completePair, createPair, createRoom, history
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
 import { firstName, mergeMessages, previewOf } from "./lib/ingest";
-import { dayLabel, greeting, seedEmoji, time } from "./lib/format";
+import { dayLabel, greeting, listStamp } from "./lib/format";
 import { useConversationSync } from "./hooks/useConversationSync";
 import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
 import { confetti, emojiBurst, isCelebration } from "./lib/effects";
@@ -622,7 +622,7 @@ export default function App() {
             <small>{c.lastPreview ? `${c.lastPreviewSender ? `${c.lastPreviewSender}: ` : ""}${c.lastPreview}` : c.kind === "group" ? `${c.members.length} of you` : "Just the two of you"}</small>
           </span>
           <span className="conversation-meta">
-            <time>{c.lastMessageAt ? time(c.lastMessageAt) : ""}</time>
+            <time>{c.lastMessageAt ? listStamp(c.lastMessageAt) : ""}</time>
             {(c.unread ?? 0) > 0 && <i className="unread">{(c.unread ?? 0) > 9 ? "9+" : c.unread}</i>}
           </span>
         </button>)}

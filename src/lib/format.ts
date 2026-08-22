@@ -39,13 +39,38 @@ export const seedEmoji = (seed: string): string | null => seed.startsWith("e:") 
 export const time = (n: number): string =>
   new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(n);
 
+const startOfDay = (d: Date): number => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+
+/** Whole days between two instants, counting calendar days rather than 24-hour spans. */
+const daysApart = (n: number, now: Date): number =>
+  Math.round((startOfDay(now) - startOfDay(new Date(n))) / 86_400_000);
+
 export const dayLabel = (n: number, now = new Date()): string => {
-  const d = new Date(n);
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (d.toDateString() === now.toDateString()) return "Today";
-  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "short", day: "numeric" }).format(n);
+  const days = daysApart(n, now);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  const sameYear = new Date(n).getFullYear() === now.getFullYear();
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "long", month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" })
+  }).format(n);
+};
+
+/**
+ * When something happened, for a summary row rather than a message.
+ *
+ * A conversation list showed `time()` no matter how old the row was, so last week's message read
+ * "4:23 PM" and looked like it had just arrived. Inside a thread that is fine — the day dividers
+ * carry the date — but a list has nothing else to say it with.
+ */
+export const listStamp = (n: number, now = new Date()): string => {
+  const days = daysApart(n, now);
+  if (days <= 0) return time(n);
+  if (days === 1) return "Yesterday";
+  if (days < 7) return new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(n);
+  const sameYear = new Date(n).getFullYear() === now.getFullYear();
+  return new Intl.DateTimeFormat(undefined, sameYear
+    ? { month: "short", day: "numeric" }
+    : { month: "short", day: "numeric", year: "numeric" }).format(n);
 };
 
 /** A short all-emoji message gets rendered large, the way every messenger does it. */
