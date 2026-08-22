@@ -833,6 +833,15 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 @media (min-width: 761px) {
   .sidebar > header { padding: 0 12px; }
+
+  /* Bubbles cap at 560px but the pane is as wide as the window, so on a laptop an incoming
+     message hugged the far left and the reply hugged the far right with 700px of nothing
+     between them. The thread is a column; only the scrollbar and the background are full width. */
+  .messages > * { width: 100%; max-width: 780px; margin-inline: auto; }
+  .messages { align-items: stretch; }
+  .composer { left: 50%; transform: translateX(-50%); width: min(100%, 800px); right: auto; }
+  /* The header belongs to the same column, or the title floats off on its own at the far left. */
+  .chat-head { padding-inline: max(12px, calc((100% - 792px) / 2)); }
   /* a bottom sheet is a phone idiom; on a wide screen float the card instead */
   .scrim { align-items: center; padding: 24px; }
   /* a centred card is not anchored to an edge, so it owes the safe area nothing */
