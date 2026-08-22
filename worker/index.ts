@@ -283,12 +283,18 @@ export class InviteTicket extends DurableObject<Env> {
     return this.ctx.storage.get<InviteRecord>("record");
   }
 
-  /** Live means: exists, not revoked, not expired, and not already spent. */
+  /** Open means the link itself is still good: it exists, and was neither revoked nor timed out. */
+  private open(record: InviteRecord | undefined, now = Date.now()): record is InviteRecord {
+    return !!record && !record.revoked && record.expiresAt > now;
+  }
+
+  /** Spent means every use it was issued with has been claimed by a different device. */
+  private spent(record: InviteRecord): boolean {
+    return record.maxUses !== null && record.uses >= record.maxUses;
+  }
+
   private live(record: InviteRecord | undefined, now = Date.now()): record is InviteRecord {
-    if (!record || record.revoked) return false;
-    if (record.expiresAt <= now) return false;
-    if (record.maxUses !== null && record.uses >= record.maxUses) return false;
-    return true;
+    return this.open(record, now) && !this.spent(record);
   }
 
   private remaining(record: InviteRecord): number | null {
@@ -381,7 +387,13 @@ export class InviteTicket extends DurableObject<Env> {
       }
       const signed = await verifySignedBy(request, await sha256b64(enc.encode(bodyText)), body.member, burn);
       if (!signed) return error("Unauthorized", 401);
-      if (!this.live(record, now)) return error("This invite has expired", 410);
+      // A device that has already redeemed this link is let through a spent one. Tapping the same
+      // invite twice is what actually happens — the link gets reopened, shared into the app, or
+      // hit again after a reinstall — and refusing that would lock people out of their own invite
+      // without any second person ever having used it. Revoked and expired still bite.
+      const returning = !!(await this.ctx.storage.get(`used:${body.member.deviceId}`));
+      if (!this.open(record, now)) return error("This invite has expired", 410);
+      if (!returning && this.spent(record)) return error("This invite has already been used", 410);
       // The check the whole design rests on: the relay stores every code it hands out, so without
       // this, holding the relay's own data would be enough to join any room it relays for.
       if (body.proof !== record.proof) return error("This invite is not valid", 403);
@@ -400,7 +412,7 @@ export class InviteTicket extends DurableObject<Env> {
 
       // Counted only once per device, so that reopening the link on the same phone — which is
       // what happens every time someone taps it again — does not burn a use of a one-use invite.
-      if (!(await this.ctx.storage.get(`used:${member.deviceId}`))) {
+      if (!returning) {
         await this.ctx.storage.put(`used:${member.deviceId}`, now);
         await this.ctx.storage.put("record", { ...record, uses: record.uses + 1 });
       }
