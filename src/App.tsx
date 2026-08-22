@@ -6,7 +6,7 @@ import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, r
 import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
-import { firstName, mergeMessages, previewOf } from "./lib/ingest";
+import { deletedIds, firstName, mergeMessages, previewOf, redact } from "./lib/ingest";
 import { dayLabel, greeting, listStamp } from "./lib/format";
 import { useConversationSync } from "./hooks/useConversationSync";
 import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
@@ -18,7 +18,7 @@ import { Lightbox } from "./components/Media";
 import { Avatar, ConversationAvatar, Mark } from "./components/Avatar";
 import { FamilyCard } from "./components/FamilyCard";
 import { ProfileEditor } from "./components/ProfileEditor";
-import { Bubble } from "./components/Bubble";
+import { Bubble, type QuotedMessage } from "./components/Bubble";
 
 type Panel = "none" | "pair" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile";
 type InstallPrompt = Event & { prompt(): Promise<void> };
@@ -48,6 +48,7 @@ export default function App() {
   const [recElapsed, setRecElapsed] = useState(0);
   const [shareIntake, setShareIntake] = useState<{ files: File[]; text: string } | null>(null);
   const [recent, setRecent] = useState<Record<string, ChatMessage[]>>({});
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
 
   const identityRef = useRef<LocalIdentity | null>(identity);
   const activeIdRef = useRef<string | null>(activeId);
@@ -281,7 +282,7 @@ export default function App() {
       setMessages(x => ({ ...x, [activeId]: cached }));
       await markRead(activeId);
     })();
-    setTyping([]); setReactFor(null);
+    setTyping([]); setReactFor(null); setReplyTo(null);
     const onVisible = () => { if (!document.hidden && activeIdRef.current === activeId) void markRead(activeId); };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
@@ -359,12 +360,13 @@ export default function App() {
 
   async function sendText(): Promise<void> {
     const text = draft.trim(); if (!text || !active) return;
-    setDraft("");
+    const quoting = replyTo;
+    setDraft(""); setReplyTo(null);
     if (composer.current) composer.current.style.height = "";
     sync.sendTyping(active.id, false);
     sounds.send(); buzz(8);
     if (isCelebration(text)) { confetti(); sounds.tada(); }
-    await send(active, { type: "text", text });
+    await send(active, { type: "text", text, ...(quoting ? { replyTo: quoting.id } : {}) });
   }
 
   async function sendFile(conv: Conversation, file: File, extra?: { durationMs?: number }): Promise<void> {
@@ -431,6 +433,35 @@ export default function App() {
       if (sent) flash(sent === 1 ? "Sent the message that was waiting ✉️" : `Sent ${sent} messages that were waiting ✉️`);
       else if (stuck) flash("Some messages couldn’t be sent — tap them to try again");
     } finally { flushing.current = false; }
+  }
+
+  async function copyMessage(m: ChatMessage): Promise<void> {
+    setReactFor(null);
+    if (m.payload.type !== "text" || !m.payload.text) return;
+    try { await navigator.clipboard.writeText(m.payload.text); flash("Copied 📋"); }
+    catch { flash("Couldn’t copy that"); }
+  }
+
+  /**
+   * Take a message back. Everyone folds the event in and drops the contents, so this is a real
+   * retraction rather than a local hide — but only for messages we sent, since a delete naming
+   * somebody else's message is refused on the way in.
+   */
+  async function deleteMessageForEveryone(m: ChatMessage): Promise<void> {
+    const me = identityRef.current;
+    setReactFor(null);
+    if (!active || !me || m.senderDeviceId !== me.deviceId) return;
+    if (replyTo?.id === m.id) setReplyTo(null);
+    buzz(12);
+    await send(active, { type: "event", event: { kind: "delete", targetId: m.id } });
+  }
+
+  function jumpTo(id: string): void {
+    const el = document.getElementById(`msg-${id}`);
+    if (!el) return flash("That message isn’t loaded any more");
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.add("flash-jump");
+    setTimeout(() => el.classList.remove("flash-jump"), 1400);
   }
 
   async function react(m: ChatMessage, emoji: string, at?: { x: number; y: number }): Promise<void> {
@@ -608,7 +639,7 @@ export default function App() {
 
   // ---------- derived ----------
   const sorted = useMemo(() => [...conversations].sort((a, b) => (b.lastMessageAt ?? b.createdAt) - (a.lastMessageAt ?? a.createdAt)), [conversations]);
-  const { visible, reactions } = useMemo(() => {
+  const { visible, reactions, deleted } = useMemo(() => {
     const sortedMsgs = [...activeMessages].sort((a, b) => a.createdAt - b.createdAt);
     const reactions = new Map<string, Record<string, string[]>>();
     for (const m of sortedMsgs) {
@@ -619,7 +650,7 @@ export default function App() {
       rec[ev.value] = arr.includes(m.senderDeviceId) ? arr.filter(d => d !== m.senderDeviceId) : [...arr, m.senderDeviceId];
       reactions.set(ev.targetId, rec);
     }
-    return { visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions };
+    return { visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions, deleted: deletedIds(sortedMsgs) };
   }, [activeMessages]);
   // With one or two chats a list is mostly empty space — show a proper card for each instead.
   const showCards = sorted.length > 0 && sorted.length <= 3;
@@ -635,6 +666,35 @@ export default function App() {
     })();
     return () => { live = false; };
   }, [showCards, sorted]);
+
+  // A tombstone that leaves the text sitting in IndexedDB is not a deletion. Redacting the stored
+  // copy also makes it stick: the envelope stays on the relay for its seven days, but a replay
+  // skips anything already stored, so the message never comes back with its contents.
+  useEffect(() => {
+    if (!deleted.size || !activeId) return;
+    const stale = visible.filter(m => deleted.has(m.id) && !m.deletedAt);
+    if (!stale.length) return;
+    void (async () => {
+      const redacted = stale.map(redact);
+      for (const m of redacted) await putMessage(m);
+      setMessages(x => ({ ...x, [activeId]: mergeMessages(x[activeId] ?? [], redacted) }));
+    })();
+  }, [deleted, visible, activeId]);
+
+  const nameFor = useCallback((deviceId: string): string => {
+    if (deviceId === identity?.deviceId) return "You";
+    const member = active?.members.find(m => m.deviceId === deviceId);
+    return member ? firstName(member.displayName) : "Someone";
+  }, [identity?.deviceId, active]);
+
+  const quotedFor = useCallback((m: ChatMessage): QuotedMessage | undefined => {
+    const id = m.payload.replyTo;
+    if (!id) return undefined;
+    const target = visible.find(x => x.id === id);
+    if (!target) return { id, name: "", preview: "Message not loaded", gone: true };
+    if (deleted.has(id)) return { id, name: nameFor(target.senderDeviceId), preview: "Message deleted", gone: true };
+    return { id, name: nameFor(target.senderDeviceId), preview: previewOf(target.payload) || "Message", gone: false };
+  }, [visible, deleted, nameFor]);
 
   const typingNames = typing.map(d => active?.members.find(m => m.deviceId === d)?.displayName).filter(Boolean).map(n => firstName(n!));
   const showIosInstall = isAppleTouchDevice() && !isStandalone();
@@ -703,16 +763,26 @@ export default function App() {
                 reactions={reactions.get(m.id)}
                 reacting={reactFor === m.id}
                 last={i === visible.length - 1}
+                deleted={deleted.has(m.id)}
+                quoted={quotedFor(m)}
                 onReactBar={() => setReactFor(x => x === m.id ? null : m.id)}
                 onReact={(emoji, at) => void react(m, emoji, at)}
                 onOpenMedia={(att, url) => setLightbox({ att, url })}
-                onRetry={() => void retry(m)}/>
+                onRetry={() => void retry(m)}
+                onReply={() => { setReactFor(null); setReplyTo(m); composer.current?.focus(); }}
+                onCopy={() => void copyMessage(m)}
+                onDelete={() => void deleteMessageForEveryone(m)}
+                onJump={jumpTo}/>
             </Fragment>;
           })}
           {typingNames.length > 0 && <div className="typing"><i/><i/><i/></div>}
         </div>
 
         <div className="composer" ref={composerBox}>
+          {replyTo && !rec && <div className="reply-chip">
+            <span><b>Replying to {nameFor(replyTo.senderDeviceId)}</b><em>{previewOf(replyTo.payload) || "Message"}</em></span>
+            <button onClick={() => setReplyTo(null)} aria-label="Cancel reply">✕</button>
+          </div>}
           <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden onChange={e => { const f = e.target.files?.[0]; if (f && active) void sendFile(active, f); e.currentTarget.value = ""; }}/>
           <input ref={mediaInput} type="file" accept="image/*,video/*" multiple hidden onChange={e => { const fs = [...(e.target.files ?? [])]; if (active) fs.forEach(f => void sendFile(active, f)); e.currentTarget.value = ""; }}/>
           <input ref={fileInput} type="file" hidden onChange={e => { const f = e.target.files?.[0]; if (f && active) void sendFile(active, f); e.currentTarget.value = ""; }}/>

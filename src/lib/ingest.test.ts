@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mergeMessages, openEnvelope, openEnvelopes, previewOf, reconnectDelay, summarize } from "./ingest";
+import { deletedIds, mergeMessages, openEnvelope, openEnvelopes, previewOf, reconnectDelay, redact, summarize } from "./ingest";
 import { encryptPayload, generateIdentity, publicMember, randomKey, signEnvelope } from "./crypto";
 import type { AttachmentPayload, ChatMessage, Conversation, LocalIdentity } from "./types";
 
@@ -183,5 +183,47 @@ describe("reconnectDelay", () => {
 
   it("spreads attempts out instead of firing them together", () => {
     expect(reconnectDelay(3, () => 0)).not.toBe(reconnectDelay(3, () => 0.99));
+  });
+});
+
+describe("deletedIds", () => {
+  const msg = (id: string, from: string, payload: ChatMessage["payload"]): ChatMessage =>
+    ({ id, conversationId: "room-1", senderDeviceId: from, createdAt: 1, payload });
+  const del = (id: string, from: string, targetId: string): ChatMessage =>
+    msg(id, from, { type: "event", event: { kind: "delete", targetId } });
+
+  it("marks a message its own sender took back", () => {
+    const ids = deletedIds([msg("m1", "alice", { type: "text", text: "oops" }), del("e1", "alice", "m1")]);
+    expect([...ids]).toEqual(["m1"]);
+  });
+
+  it("refuses a delete naming somebody else's message", () => {
+    // The envelope is signed, so the relay cannot forge this — but nothing stops a member of the
+    // family from broadcasting it, and honouring it would let anyone silence anyone.
+    const ids = deletedIds([msg("m1", "alice", { type: "text", text: "mine" }), del("e1", "bob", "m1")]);
+    expect(ids.size).toBe(0);
+  });
+
+  it("ignores a delete for a message it is not holding", () => {
+    expect(deletedIds([del("e1", "alice", "long-gone")]).size).toBe(0);
+  });
+
+  it("ignores reaction events", () => {
+    const react = msg("e1", "alice", { type: "event", event: { kind: "reaction", targetId: "m1", value: "❤️" } });
+    expect(deletedIds([msg("m1", "alice", { type: "text", text: "hi" }), react]).size).toBe(0);
+  });
+});
+
+describe("redact", () => {
+  it("drops the contents rather than only the rendering", () => {
+    const att = { fileId: "f1", name: "secret.png", mime: "image/png", size: 10, iv: "i", key: "k", sha256: "s" };
+    const redacted = redact({ id: "m1", conversationId: "room-1", senderDeviceId: "alice", createdAt: 1, payload: { type: "file", attachment: att } });
+    expect(redacted.payload).toEqual({ type: "text" });
+    expect(redacted.deletedAt).toBeGreaterThan(0);
+  });
+
+  it("keeps the first deletion time when applied twice", () => {
+    const once = redact({ id: "m1", conversationId: "room-1", senderDeviceId: "alice", createdAt: 1, payload: { type: "text", text: "x" } });
+    expect(redact(once).deletedAt).toBe(once.deletedAt);
   });
 });

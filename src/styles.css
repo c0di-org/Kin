@@ -398,6 +398,35 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .bubble.media-bubble .stamp { right: 12px; bottom: 7px; }
 
 .sender { display: block; font-weight: 900; margin-bottom: 2px; font-size: 13.5px; }
+
+/* ---------- replies ---------- */
+.quote {
+  display: grid; gap: 1px; width: 100%; text-align: left; margin: 2px 0 6px;
+  padding: 7px 11px; border-radius: 14px; border-left: 3px solid currentColor;
+  background: var(--tint); color: inherit; font-size: 13.5px; line-height: 1.35;
+}
+.mine .quote { background: rgba(255, 255, 255, .18); }
+.quote b { font-weight: 900; }
+.quote em { font-style: normal; opacity: .78; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gone-text { opacity: .72; font-style: italic; }
+.bubble.deleted { background: transparent; box-shadow: none; border-style: dashed; }
+.mine .bubble.deleted { background: transparent; color: var(--sub); }
+.mine .bubble.deleted::before { display: none; }
+.mine .bubble.deleted .stamp { color: var(--sub); }
+/* Landing on a quoted message from a long way up the thread needs saying, or the jump reads as
+   the list having lost your place. */
+.flash-jump .bubble { animation: flash-jump 1.4s ease-out; }
+
+.reply-chip {
+  flex-basis: 100%; order: -1; display: flex; align-items: center; gap: 8px;
+  margin: 2px 4px 6px; padding: 7px 8px 7px 12px; border-radius: 18px;
+  background: var(--tint); border-left: 3px solid var(--accent); font-size: 13.5px; min-width: 0;
+}
+.reply-chip span { display: grid; gap: 1px; min-width: 0; }
+.reply-chip b { font-weight: 900; font-size: 12.5px; color: var(--accent-ink); }
+.reply-chip em { font-style: normal; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-chip button { margin-left: auto; width: 34px; height: 34px; flex: none; border-radius: 50%; color: var(--sub); font-size: 15px; }
+.reply-chip button:hover { background: var(--tint); }
 .stamp { position: absolute; right: 13px; bottom: 6px; font-size: 11.5px; color: var(--sub); font-weight: 800; white-space: nowrap; }
 .mine .stamp { color: #fff; }
 .media-bubble .stamp { background: rgba(20, 15, 50, .66); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); color: #fff; padding: 3px 9px; border-radius: 999px; opacity: 1; }
@@ -409,7 +438,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 /* reactions */
 .react-bar {
   position: absolute; bottom: 100%; margin-bottom: 8px; z-index: 8;
-  display: flex; gap: 2px; background: var(--glass-strong); border-radius: 999px;
+  display: grid; gap: 2px; background: var(--glass-strong); border-radius: 26px;
   border: 1px solid var(--glass-line); padding: 6px 8px;
   -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-big);
@@ -421,8 +450,19 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .mine .react-bar { right: 0; }
 /* The bar overlays whatever is behind it, so the target says which message it belongs to. */
 .bubble.reacting { outline: 2.5px solid var(--accent); outline-offset: 3px; }
-.react-bar button { font-size: 25px; width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; transition: transform .16s cubic-bezier(.3, 1.6, .5, 1); }
-.react-bar button:hover { transform: scale(1.4) translateY(-3px); }
+.react-row { display: flex; gap: 2px; }
+.react-row button { font-size: 25px; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; transition: transform .16s cubic-bezier(.3, 1.6, .5, 1); }
+.react-row button:hover { transform: scale(1.4) translateY(-3px); }
+/* Reply, copy and delete live with the reactions because a long press is the one gesture that
+   already means "do something to this message" — a second one would need teaching too. */
+.act-row { display: flex; gap: 4px; padding: 2px; border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
+.act-row button {
+  flex: 1; min-height: 40px; padding: 0 12px; border-radius: 16px; white-space: nowrap;
+  font-size: 14px; font-weight: 800; color: var(--ink); transition: background .16s;
+}
+.act-row button:hover { background: var(--tint); }
+.act-row .act-danger { color: #c02b46; }
+.act-row .act-danger:hover { background: rgba(192, 43, 70, .12); }
 .chips { display: flex; gap: 4px; margin: -9px 8px 4px; z-index: 3; flex-wrap: wrap; }
 .chips button {
   background: var(--glass-strong); border: 1px solid var(--glass-line); border-radius: 999px;
@@ -507,7 +547,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   position: absolute; z-index: 3;
   left: max(10px, var(--safe-left)); right: max(10px, var(--safe-right));
   bottom: calc(10px + var(--safe-bottom));
-  display: flex; gap: 7px; align-items: flex-end;
+  display: flex; flex-wrap: wrap; gap: 7px; align-items: flex-end;
   padding: 8px; border-radius: 30px; box-shadow: var(--shadow), var(--gloss);
   background: var(--paper);
 }
@@ -763,6 +803,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 @keyframes bubble-in { from { transform: scale(.86) translateY(8px); opacity: 0; } }
 @keyframes sheet-up { from { transform: translateY(60px); opacity: 0; } }
 @keyframes toast-in { from { transform: translate(-50%, 20px); opacity: 0; } }
+@keyframes flash-jump { 0%, 45% { box-shadow: 0 0 0 3px var(--accent), var(--shadow); } }
 @keyframes wiggle { 0%, 100% { transform: rotate(-3deg) translateY(0); } 50% { transform: rotate(3deg) translateY(-5px); } }
 @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
 @keyframes bounce-dot { 0%, 100% { transform: translateY(0); opacity: .55; } 50% { transform: translateY(-6px); opacity: 1; } }

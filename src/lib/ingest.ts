@@ -54,6 +54,30 @@ export function previewOf(payload: ChatPayload): string {
 }
 
 /**
+ * Which messages have been taken back, folded out of the event stream the same way reactions are.
+ *
+ * A delete is only honoured from the person who sent the message: the payload is signed, so the
+ * relay cannot forge one, but nothing stops a family member from broadcasting a delete naming
+ * somebody else's message. A target we are not holding is ignored rather than trusted, since
+ * there is no sender to check it against.
+ */
+export function deletedIds(messages: ChatMessage[]): Set<string> {
+  const senderOf = new Map(messages.map(m => [m.id, m.senderDeviceId]));
+  const deleted = new Set<string>();
+  for (const m of messages) {
+    const ev = m.payload.event;
+    if (m.payload.type !== "event" || ev?.kind !== "delete") continue;
+    if (senderOf.get(ev.targetId) === m.senderDeviceId) deleted.add(ev.targetId);
+  }
+  return deleted;
+}
+
+/** A deleted message with its contents actually gone, rather than merely not drawn. */
+export function redact(m: ChatMessage): ChatMessage {
+  return { ...m, payload: { type: "text" }, deletedAt: m.deletedAt ?? Date.now() };
+}
+
+/**
  * What a batch of newly-opened messages does to a conversation's summary row.
  *
  * Events — edits, reactions, deletions — deliberately never become the preview line or bump the

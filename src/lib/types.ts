@@ -68,6 +68,8 @@ export type ChatMessage = {
   createdAt: number;
   payload: ChatPayload;
   status?: "sending" | "sent" | "delivered" | "read" | "failed";
+  /** Set once a delete event for this message has been folded in and its contents dropped. */
+  deletedAt?: number;
   reactions?: Record<string, string[]>;
 };
 
