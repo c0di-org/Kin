@@ -141,6 +141,77 @@ export async function unwrapConversationKey(identity: LocalIdentity, peer: Publi
   return b64(clear);
 }
 
+/** HKDF a 256-bit AES-GCM key out of raw secret bytes, domain-separated by `label`. */
+async function deriveAesFrom(secret: Uint8Array, label: string, extractable = true): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey("raw", asBytes(secret), "HKDF", false, ["deriveKey"]);
+  const salt = await crypto.subtle.digest("SHA-256", enc.encode(`kin:${label}`));
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt, info: enc.encode(`kin-${label}-v1`) },
+    material, { name: "AES-GCM", length: 256 }, extractable, ["encrypt", "decrypt"]
+  );
+}
+
+/**
+ * A channel's key, derived from the key of the space it lives in.
+ *
+ * This is the whole reason channels are cheap: a space member can compute the key for a channel
+ * they have never seen from its id alone, so creating one needs no pairing, no rewrapping and no
+ * round trip to anybody else's device. It also means channels inherit the space's trust exactly
+ * — everyone in the space can read every channel in it, whether or not they have opened it.
+ * Anything that needs a narrower audience than the space is a separate space, not a channel.
+ */
+export async function deriveChannelKey(spaceKey: string, channelId: string): Promise<string> {
+  const key = await deriveAesFrom(unb64(spaceKey), `channel:${channelId}`);
+  return b64(await crypto.subtle.exportKey("raw", key));
+}
+
+/** Encrypt a channel's name and emoji under the space key, for the relay to hold and not read. */
+export async function sealChannelMeta(spaceKey: string, meta: { title: string; emoji: string }): Promise<{ blob: string; iv: string }> {
+  const key = await deriveAesFrom(unb64(spaceKey), "channel-directory", false);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const blob = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(meta)));
+  return { blob: b64(blob), iv: b64(iv) };
+}
+
+export async function openChannelMeta(spaceKey: string, blob: string, iv: string): Promise<{ title: string; emoji: string }> {
+  const key = await deriveAesFrom(unb64(spaceKey), "channel-directory", false);
+  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, key, unb64(blob));
+  return JSON.parse(dec.decode(clear)) as { title: string; emoji: string };
+}
+
+/**
+ * The two values an invite secret produces, neither of which reveals it.
+ *
+ * `proof` is what the relay stores and checks at redemption, so that knowing an invite *code* —
+ * which the relay does know — is not enough to walk into the room. `key` never leaves the
+ * browser: it is what the room key is sealed under, which is what keeps the relay unable to read
+ * a room it is handing out invites to.
+ */
+async function inviteMaterial(code: string, secret: string): Promise<{ proof: string; key: CryptoKey }> {
+  const bytes = unb64(secret);
+  return {
+    proof: await sha256(`kin-invite-proof:${code}:${secret}`),
+    key: await deriveAesFrom(bytes, `invite:${code}`, false)
+  };
+}
+
+export function inviteSecret(): string {
+  return b64(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+export async function sealInvite(code: string, secret: string, roomKey: string): Promise<{ proof: string; wrappedKey: string; iv: string }> {
+  const { proof, key } = await inviteMaterial(code, secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const wrappedKey = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, unb64(roomKey));
+  return { proof, wrappedKey: b64(wrappedKey), iv: b64(iv) };
+}
+
+export async function openInvite(code: string, secret: string, wrappedKey: string, iv: string): Promise<{ proof: string; roomKey: string }> {
+  const { proof, key } = await inviteMaterial(code, secret);
+  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, key, unb64(wrappedKey));
+  return { proof, roomKey: b64(clear) };
+}
+
 const EMOJI = ["🌿","🌙","⭐","🍓","🐳","🦊","🌈","🍋","🪁","🐝","🍀","🫐","🐢","🌸","☀️","🎈","🦋","🍉","🐬","🌻","🥝","🧸","🏕️","🍪"];
 export async function safetyCode(a: PublicMember, b: PublicMember): Promise<string> {
   const fingerprints = [JSON.stringify(a.dhPublicJwk), JSON.stringify(b.dhPublicJwk)].sort().join("|");
