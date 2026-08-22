@@ -27,6 +27,13 @@
   --glass: rgba(255, 255, 255, .52);
   --glass-strong: rgba(255, 255, 255, .74);
   --glass-line: rgba(255, 255, 255, .78);
+  /* Text-bearing surfaces are deliberately NOT translucent. The aurora behind them drifts for
+     30s at a time, so anything see-through makes its own contrast a moving target — a timestamp
+     that reads at 4.6:1 now reads at 3.1:1 ninety seconds later. Panels and chrome stay glass;
+     bubbles, sheets and the composer sit on these. */
+  --paper: #fbfaff;
+  --paper-2: #f4f3fc;
+  --field-focus: #fff;
   --glass-blur: saturate(180%) blur(26px);
   --surface: var(--glass);
   --raised: var(--glass-strong);
@@ -35,15 +42,23 @@
 
   /* ink */
   --ink: #241f3d;
-  --sub: #6f6c9c;
+  /* 4.6:1 on --paper at 13px, which is the smallest thing that uses it. */
+  --sub: #5b5885;
   --mine-ink: #fff;
   --avatar-l: 78%;
   --name-l: 46%;
 
   /* accents */
   --accent: #7c6cff;
+  /* --accent is a fill colour. On a light surface it is 2.9:1, so text that happens to be
+     purple — a setting's value, a chip's label — uses this instead. */
+  --accent-ink: #5646c4;
   --accent-2: #ff77bd;
   --grad: linear-gradient(135deg, #45c2ff 0%, #8a7bff 48%, #ff77bd 100%);
+  /* The bright gradient carries short bold labels fine, but 16.5px body text and a 10.5px
+     timestamp both sit on the outgoing bubble, and white over #ff77bd is 2.3:1. Same ramp,
+     darkened until white clears 4.5:1 at every stop. */
+  --grad-mine: linear-gradient(135deg, #1a72b3 0%, #5b47cf 48%, #b23a80 100%);
   --grad-warm: linear-gradient(135deg, #ffd645 0%, #ff9d4d 55%, #ff77bd 100%);
   --grad-soft: linear-gradient(135deg, rgba(69, 194, 255, .18), rgba(255, 119, 189, .18));
 
@@ -212,7 +227,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .conversation-list.as-cards { display: grid; gap: 14px; padding: 6px 4px calc(110px + var(--safe-bottom)); align-content: start; }
 .family-card {
   border-radius: 30px; padding: 6px; display: grid; gap: 2px;
-  background: var(--glass-strong); border: 1px solid var(--glass-line);
+  background: var(--paper); border: 1px solid var(--glass-line);
   box-shadow: var(--shadow), var(--gloss);
   transition: transform .18s cubic-bezier(.3, 1.4, .5, 1), box-shadow .18s, border-color .18s;
 }
@@ -244,7 +259,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 }
 .family-recent {
   width: 100%; display: grid; gap: 3px; text-align: left; padding: 10px 14px 12px;
-  border-radius: 24px; background: rgba(255, 255, 255, .38); border: 1px solid var(--glass-line);
+  border-radius: 24px; background: var(--paper-2); border: 1px solid var(--glass-line);
 }
 .family-line { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: baseline; font-size: 13.5px; }
 .family-line b { font-weight: 900; }
@@ -277,7 +292,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   padding: var(--safe-top) max(12px, var(--safe-right)) 0 max(12px, var(--safe-left));
   border-bottom: 1px solid var(--line); flex: none;
   display: flex; align-items: center; justify-content: space-between; gap: 6px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .5), rgba(255, 255, 255, 0));
+  background: var(--paper);
 }
 .chat-person { display: flex; align-items: center; gap: 12px; text-align: left; margin-right: auto; min-width: 0; border-radius: 20px; padding: 6px 12px 6px 6px; transition: background .18s; }
 .chat-person:hover { background: rgba(255, 255, 255, .5); }
@@ -306,8 +321,10 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   --dock: calc(var(--composer-h) + var(--safe-bottom) + 20px);
   padding: 22px max(16px, var(--safe-right)) var(--dock) max(16px, var(--safe-left));
   scroll-padding-bottom: var(--dock);
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--dock)), transparent calc(100% - var(--dock) * .42));
-  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--dock)), transparent calc(100% - var(--dock) * .42));
+  /* Only the sliver actually behind the composer dissolves. Fading across the whole dock made a
+     photo scrolling past look like a broken render rather than depth. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--dock)), rgba(0, 0, 0, .12) calc(100% - var(--dock) + 26px), rgba(0, 0, 0, .12));
+  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--dock)), rgba(0, 0, 0, .12) calc(100% - var(--dock) + 26px), rgba(0, 0, 0, .12));
   display: flex; flex-direction: column; gap: 3px; scrollbar-width: thin;
   scrollbar-color: rgba(124, 108, 255, .28) transparent;
 }
@@ -315,7 +332,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .messages::-webkit-scrollbar-thumb { background: rgba(124, 108, 255, .25); border-radius: 999px; }
 .day { display: grid; place-items: center; margin: 20px 0 10px; }
 .day span {
-  background: var(--glass-strong); border: 1px solid var(--glass-line); color: var(--sub);
+  background: var(--paper); border: 1px solid var(--glass-line); color: var(--sub);
   font-size: 12.5px; font-weight: 800; padding: 6px 16px; border-radius: 999px; box-shadow: var(--shadow);
 }
 
@@ -329,24 +346,24 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 .bubble {
   position: relative; padding: 11px 15px 21px; border-radius: 26px;
-  background: rgba(255, 255, 255, .72); border: 1px solid rgba(255, 255, 255, .8);
+  background: var(--paper); border: 1px solid rgba(255, 255, 255, .8);
   box-shadow: var(--shadow), var(--gloss);
   white-space: pre-wrap; word-break: break-word; font-size: 16.5px; line-height: 1.42;
   animation: bubble-in .34s cubic-bezier(.25, 1.5, .5, 1); transform-origin: bottom;
   min-width: 78px;
 }
 .mine .bubble {
-  background: var(--grad); color: var(--mine-ink); border-color: rgba(255, 255, 255, .35);
+  background: var(--grad-mine); color: var(--mine-ink); border-color: rgba(255, 255, 255, .35);
   border-bottom-right-radius: 9px; transform-origin: bottom right;
   box-shadow: 0 10px 24px rgba(124, 108, 255, .3), var(--gloss);
 }
 .mine .bubble::before {
   content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .28), rgba(255, 255, 255, 0) 58%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .12), rgba(255, 255, 255, 0) 58%);
 }
 .theirs .bubble { border-bottom-left-radius: 9px; transform-origin: bottom left; }
 .row.grouped .bubble { animation: none; }
-.bubble.pending { opacity: .62; }
+.bubble.pending { opacity: .88; }
 .bubble.failed { outline: 2px dashed #ff6b8a; outline-offset: 2px; cursor: pointer; }
 .bubble.big-emoji { background: none; box-shadow: none; border: 0; padding: 4px 8px 20px; }
 .bubble.big-emoji::before { display: none; }
@@ -357,11 +374,11 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .bubble.media-bubble .stamp { right: 12px; bottom: 7px; }
 
 .sender { display: block; font-weight: 900; margin-bottom: 2px; font-size: 13.5px; }
-.stamp { position: absolute; right: 13px; bottom: 6px; font-size: 10.5px; opacity: .62; font-weight: 800; white-space: nowrap; }
-.mine .stamp { color: #fff; opacity: .85; }
-.media-bubble .stamp { background: rgba(20, 15, 50, .42); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); color: #fff; padding: 3px 9px; border-radius: 999px; opacity: 1; }
+.stamp { position: absolute; right: 13px; bottom: 6px; font-size: 11.5px; color: var(--sub); font-weight: 800; white-space: nowrap; }
+.mine .stamp { color: #fff; }
+.media-bubble .stamp { background: rgba(20, 15, 50, .66); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); color: #fff; padding: 3px 9px; border-radius: 999px; opacity: 1; }
 .tick { font-weight: 900; }
-.tick.read { color: #b6ffe9; }
+.tick.read { color: #7cf3d3; }
 .bubble.failed .tick { color: #ffdfe6; }
 .theirs .bubble.failed .tick { color: #ff6b8a; }
 
@@ -436,7 +453,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
 /* empty-state cards */
 .invite-card, .hello-card {
-  align-self: center; text-align: center; background: var(--glass-strong); border-radius: 32px;
+  align-self: center; text-align: center; background: var(--paper); border-radius: 32px;
   border: 1px solid var(--glass-line); padding: 30px 28px; margin: auto 0 14px;
   box-shadow: var(--shadow-big), var(--gloss); max-width: 340px;
   display: grid; justify-items: center; gap: 8px; animation: bubble-in .45s cubic-bezier(.25, 1.4, .5, 1);
@@ -448,7 +465,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .hello-card p { font-size: 16px; color: var(--sub); font-weight: 800; margin: 0; }
 
 .typing {
-  width: 66px; padding: 16px; border-radius: 24px; background: rgba(255, 255, 255, .72);
+  width: 66px; padding: 16px; border-radius: 24px; background: var(--paper);
   border: 1px solid var(--glass-line); display: flex; gap: 6px; margin-top: 11px; box-shadow: var(--shadow);
 }
 .typing i { width: 8px; height: 8px; border-radius: 50%; background: var(--sky); animation: bounce-dot 1s infinite; }
@@ -462,7 +479,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   bottom: calc(10px + var(--safe-bottom));
   display: flex; gap: 7px; align-items: flex-end;
   padding: 8px; border-radius: 30px; box-shadow: var(--shadow), var(--gloss);
-  background: var(--glass-strong);
+  background: var(--paper);
 }
 .composer-btn {
   width: 46px; height: 46px; border-radius: 50%; flex: none;
@@ -473,11 +490,11 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .composer-btn:active { transform: scale(.92); }
 .composer textarea {
   flex: 1; resize: none; max-height: 130px; min-height: 46px; padding: 11px 16px;
-  border: 1px solid transparent; border-radius: 23px; background: rgba(255, 255, 255, .58);
+  border: 1px solid transparent; border-radius: 23px; background: var(--paper-2);
   outline: none; font-size: 16px; font-weight: 600; transition: border-color .18s, background .18s;
 }
 .composer textarea::placeholder { color: var(--sub); }
-.composer textarea:focus { border-color: rgba(124, 108, 255, .45); background: rgba(255, 255, 255, .85); }
+.composer textarea:focus { border-color: rgba(124, 108, 255, .45); background: var(--field-focus); }
 .send {
   width: 46px; height: 46px; border-radius: 50%; flex: none; background: var(--grad); color: #fff;
   font-size: 23px; font-weight: 900; display: grid; place-items: center;
@@ -539,7 +556,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 }
 .sheet {
   width: min(100%, 540px); max-height: calc(var(--shell-height) - 24px); overflow: auto;
-  background: var(--glass-strong); border-radius: 36px 36px 0 0;
+  background: var(--paper); border-radius: 36px 36px 0 0;
   padding: 12px 24px calc(28px + var(--safe-bottom));
   box-shadow: var(--shadow-big), var(--gloss); animation: sheet-up .34s cubic-bezier(.25, 1.3, .5, 1);
   scrollbar-width: none;
@@ -573,14 +590,14 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .sheet > small { display: block; text-align: center; line-height: 1.5; }
 .pair-actions { display: flex; gap: 10px; justify-content: center; margin-top: 18px; }
 .chip-btn {
-  background: rgba(255, 255, 255, .7); border: 1px solid var(--glass-line); color: var(--accent);
+  background: var(--paper); border: 1px solid var(--glass-line); color: var(--accent-ink);
   font-weight: 800; padding: 11px 20px; border-radius: 999px; font-size: 14.5px;
   box-shadow: var(--shadow); transition: transform .16s cubic-bezier(.3, 1.5, .5, 1);
 }
 .chip-btn:hover { transform: translateY(-2px) scale(1.05); }
 .code-input {
   width: 100%; height: 58px; padding: 0 15px; border: 1px solid var(--glass-line); border-radius: 20px;
-  background: rgba(255, 255, 255, .62); outline: none; text-transform: uppercase; letter-spacing: .18em;
+  background: var(--paper-2); outline: none; text-transform: uppercase; letter-spacing: .18em;
   font-weight: 900; text-align: center; font-size: 21px; margin-bottom: 12px; transition: border-color .18s;
 }
 .code-input:focus { border-color: rgba(124, 108, 255, .55); }
@@ -609,10 +626,10 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .profile-preview .brand-blob { margin-bottom: 0; }
 .name-input {
   width: 100%; height: 58px; padding: 0 20px; border: 1px solid var(--glass-line); border-radius: 20px;
-  background: rgba(255, 255, 255, .62); outline: none; font-size: 16.5px; font-weight: 700;
+  background: var(--paper-2); outline: none; font-size: 16.5px; font-weight: 700;
   margin-top: 8px; transition: border-color .18s, background .18s;
 }
-.name-input:focus { border-color: rgba(124, 108, 255, .55); background: rgba(255, 255, 255, .85); }
+.name-input:focus { border-color: rgba(124, 108, 255, .55); background: var(--field-focus); }
 .profile-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .profile-actions .primary { min-width: 140px; }
 .profile strong { font-size: 21px; font-weight: 1000; }
@@ -623,7 +640,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   font-size: 20px; width: 42px; height: 42px; flex: none; border-radius: 15px; display: grid; place-items: center;
   background: var(--grad-soft); border: 1px solid var(--glass-line); text-align: center;
 }
-.setting b { margin-left: auto; color: var(--accent); font-weight: 900; font-size: 13.5px; text-align: right; }
+.setting b { margin-left: auto; color: var(--accent-ink); font-weight: 900; font-size: 13.5px; text-align: right; }
 .hint { display: flex; flex-direction: column; gap: 5px; padding: 14px 8px; border-top: 1px solid var(--line); line-height: 1.45; }
 .hint strong { font-weight: 800; }
 .hint small { color: var(--sub); font-weight: 600; }
@@ -678,8 +695,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .floaters span { position: absolute; bottom: -60px; font-size: 30px; opacity: .45; animation: float-across linear infinite; }
 .onboard {
   width: min(100%, 400px); display: flex; flex-direction: column; gap: 12px; position: relative; z-index: 2;
-  background: var(--glass-strong); border: 1px solid var(--glass-line); border-radius: 38px;
-  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  background: var(--paper); border: 1px solid var(--glass-line); border-radius: 38px;
   padding: 26px 22px 18px; box-shadow: var(--shadow-big), var(--gloss);
 }
 .big-brand { text-align: center; margin-bottom: 8px; }
@@ -699,10 +715,10 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .animal.picked { background: rgba(255, 255, 255, .95); box-shadow: var(--shadow), var(--gloss); transform: scale(1.2); outline: 2px solid rgba(124, 108, 255, .5); }
 .onboard input {
   height: 58px; padding: 0 20px; border: 1px solid var(--glass-line); border-radius: 20px;
-  background: rgba(255, 255, 255, .62); outline: none; font-size: 16.5px; font-weight: 700; transition: border-color .18s, background .18s;
+  background: var(--paper-2); outline: none; font-size: 16.5px; font-weight: 700; transition: border-color .18s, background .18s;
 }
 .onboard input::placeholder { color: var(--sub); }
-.onboard input:focus { border-color: rgba(124, 108, 255, .55); background: rgba(255, 255, 255, .85); }
+.onboard input:focus { border-color: rgba(124, 108, 255, .55); background: var(--field-focus); }
 .onboard .code-input { margin-bottom: 0; }
 
 /* ---------- effects ---------- */
@@ -757,7 +773,11 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   :root {
     --bg: #0d1026;
     --ink: #f2f0ff;
-    --sub: #9d9ac9;
+    --sub: #b6b3dd;
+    --paper: #1b1f42;
+    --paper-2: #262b55;
+    --field-focus: #303667;
+    --accent-ink: #b7adff;
     --glass: rgba(255, 255, 255, .07);
     --glass-strong: rgba(255, 255, 255, .12);
     --glass-line: rgba(255, 255, 255, .16);
@@ -781,21 +801,14 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 
   .avatar { color: #f2f0ff; border-color: rgba(255, 255, 255, .2); box-shadow: inset 0 3px 6px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .4); }
   .conversation:hover { background: rgba(255, 255, 255, .06); }
-  .family-recent { background: rgba(255, 255, 255, .05); }
   .profile:hover { background: rgba(255, 255, 255, .06); }
-  .name-input { background: rgba(255, 255, 255, .08); }
-  .name-input:focus { background: rgba(255, 255, 255, .14); }
   .chat-person:hover, .member:hover:not(:disabled), .setting:hover { background: rgba(255, 255, 255, .06); }
-  .chat-head { background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, 0)); }
-  .bubble { background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .14); }
-  .typing { background: rgba(255, 255, 255, .1); }
+  .bubble { border-color: rgba(255, 255, 255, .14); }
   .theirs .voice-track { background: rgba(255, 255, 255, .16); }
-  .composer textarea { background: rgba(255, 255, 255, .08); }
-  .composer textarea:focus { background: rgba(255, 255, 255, .14); }
   .chips button { background: rgba(40, 36, 80, .8); }
   .chips button.me { background: rgba(124, 108, 255, .3); }
-  .react-bar, .react-hint, .day span { background: rgba(40, 36, 80, .78); }
-  .chip-btn { background: rgba(255, 255, 255, .12); color: #c9c2ff; }
+  .react-bar, .react-hint { background: rgba(40, 36, 80, .92); }
+  .chip-btn { background: var(--paper-2); }
   .attach-grid button { background: rgba(255, 255, 255, .08); }
   .attach-grid span { box-shadow: var(--gloss), 0 6px 14px rgba(0, 0, 0, .32); }
   .crayon { border-color: rgba(255, 255, 255, .25); }
@@ -803,8 +816,6 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   .brush { background: rgba(255, 255, 255, .08); }
   .brush i { background: var(--sub); }
   .grab { background: rgba(255, 255, 255, .2); }
-  .onboard input, .code-input { background: rgba(255, 255, 255, .08); }
-  .onboard input:focus, .code-input:focus { background: rgba(255, 255, 255, .14); }
   .brand-blob { background: linear-gradient(150deg, rgba(255, 255, 255, .2), rgba(255, 255, 255, .06)); }
   .animal.picked { background: rgba(255, 255, 255, .18); }
   .qr { background: #fff; }
