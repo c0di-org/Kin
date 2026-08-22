@@ -56,6 +56,7 @@ export default function App() {
   const directCache = useRef(new Map<string, { id: string; key: string }>());
   const probedAt = useRef(new Map<string, number>());
   const sweeping = useRef(false);
+  const flushing = useRef(false);
   const discoverRef = useRef<() => void>(() => {});
   const cameraInput = useRef<HTMLInputElement>(null);
   const mediaInput = useRef<HTMLInputElement>(null);
@@ -91,7 +92,7 @@ export default function App() {
       setPushStatus(await currentPushStatus());
     })();
     const onInstall = (e: Event) => { e.preventDefault(); setInstallPrompt(e as InstallPrompt); };
-    const onOnline = () => setOnline(true);
+    const onOnline = () => { setOnline(true); void flushFailed(); };
     const onOffline = () => setOnline(false);
     addEventListener("beforeinstallprompt", onInstall);
     addEventListener("online", onOnline);
@@ -259,7 +260,11 @@ export default function App() {
 
   useEffect(() => {
     if (!ready || !identity) return;
-    const sweep = (force: boolean) => { if (document.visibilityState === "visible") void discoverDirectChats(force); };
+    const sweep = (force: boolean) => {
+      if (document.visibilityState !== "visible") return;
+      void discoverDirectChats(force);
+      void flushFailed();
+    };
     sweep(true);
     const timer = setInterval(() => sweep(false), 30_000);
     const onVisible = () => sweep(true);
@@ -345,7 +350,10 @@ export default function App() {
       const failed = { ...optimistic, status: "failed" as const };
       await putMessage(failed);
       setMessages(x => ({ ...x, [conv.id]: (x[conv.id] ?? []).map(m => m.id === env.id ? failed : m) }));
-      flash(online ? "Couldn’t send — tap the message to retry" : "You’re offline — tap the message to retry");
+      // A flush is already going to say how it went, once, rather than once per message.
+      if (!flushing.current) flash(navigator.onLine
+        ? "Couldn’t send — tap the message to retry"
+        : "Saved — this goes out when you’re back online");
     }
   }
 
@@ -380,17 +388,49 @@ export default function App() {
       uploadEncryptedFile(me, conv.id, fileId, encrypted.ciphertext, encrypted.sha256));
   }
 
+  /**
+   * Send a failed message again, as a fresh envelope. Throws if it cannot be reconstructed, so
+   * the caller can leave it sitting there as failed rather than dropping it on the floor.
+   */
+  async function resend(conv: Conversation, m: ChatMessage): Promise<void> {
+    const att = m.payload.type === "file" ? m.payload.attachment : undefined;
+    // Look for the bytes before deleting anything: an attachment whose blob has been evicted
+    // cannot be re-sent, and losing the row as well would lose the fact that it never arrived.
+    const stored = att ? await getBlob(att.fileId) : null;
+    if (att && !stored) throw new Error("Attachment is no longer on this device");
+    await deleteMessage(m.id);
+    setMessages(x => ({ ...x, [conv.id]: (x[conv.id] ?? []).filter(y => y.id !== m.id) }));
+    if (att && stored) await sendFile(conv, new File([stored.bytes], stored.name, { type: stored.mime }), { durationMs: att.durationMs });
+    else if (m.payload.type === "text" && m.payload.text) await send(conv, m.payload);
+  }
+
   async function retry(m: ChatMessage): Promise<void> {
     if (!active || m.status !== "failed") return;
-    await deleteMessage(m.id);
-    setMessages(x => ({ ...x, [active.id]: (x[active.id] ?? []).filter(y => y.id !== m.id) }));
-    if (m.payload.type === "file" && m.payload.attachment) {
-      const stored = await getBlob(m.payload.attachment.fileId);
-      if (!stored) return flash("Couldn’t retry that one");
-      await sendFile(active, new File([stored.bytes], stored.name, { type: stored.mime }), { durationMs: m.payload.attachment.durationMs });
-    } else if (m.payload.type === "text" && m.payload.text) {
-      await send(active, m.payload);
-    }
+    try { await resend(active, m); } catch { flash("Couldn’t retry that one"); }
+  }
+
+  /**
+   * Everything that failed to send, sent again.
+   *
+   * The offline banner promised "messages will send when you're back" and nothing was ever going
+   * to do that — a failed send sat there until someone noticed the bubble and tapped it. Since
+   * the payload is already on disk, the promise is cheaper to keep than to withdraw.
+   */
+  async function flushFailed(): Promise<void> {
+    const me = identityRef.current;
+    if (flushing.current || !me || !navigator.onLine) return;
+    flushing.current = true;
+    try {
+      let sent = 0, stuck = 0;
+      for (const conv of await listConversations()) {
+        const waiting = (await listMessages(conv.id)).filter(m => m.status === "failed" && m.senderDeviceId === me.deviceId);
+        for (const m of waiting) {
+          try { await resend(conv, m); sent++; } catch { stuck++; }
+        }
+      }
+      if (sent) flash(sent === 1 ? "Sent the message that was waiting ✉️" : `Sent ${sent} messages that were waiting ✉️`);
+      else if (stuck) flash("Some messages couldn’t be sent — tap them to try again");
+    } finally { flushing.current = false; }
   }
 
   async function react(m: ChatMessage, emoji: string, at?: { x: number; y: number }): Promise<void> {
@@ -602,9 +642,9 @@ export default function App() {
   if (!ready) return <div className="splash"><Aurora/><Mark/></div>;
   if (!identity) return <Onboarding pairCode={joinCode} create={createFamily} join={(n, a, c) => joinFamily(n, a, c)}/>;
 
-  return <div className="app">
+  return <div className={`app ${online ? "" : "is-offline"}`}>
     <Aurora/>
-    {!online && <div className="offline-bar">📡 You’re offline — messages will send when you’re back</div>}
+    {!online && <div className="offline-bar">📡 Offline — we’ll send when you’re back</div>}
     <aside className={`sidebar ${active ? "has-active" : ""}`}>
       <header>
         <div className="wordmark"><Mark/><strong>Kin</strong></div>

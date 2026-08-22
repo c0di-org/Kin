@@ -155,17 +155,25 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   display: grid;
   grid-template-columns: minmax(300px, 392px) 1fr;
   gap: 12px;
-  padding: 12px;
+  padding: calc(12px + var(--offline-h)) 12px 12px;
   isolation: isolate;
+  --offline-h: 0px;
 }
+.app.is-offline { --offline-h: 34px; }
 .sidebar, .chat { position: relative; z-index: 1; border-radius: 34px; box-shadow: var(--shadow); overflow: hidden; }
 
+/* A centred pill here landed straight on top of the chat title and wrapped to three lines. It
+   is a strip the panes make room for instead, so nothing it says covers anything. */
 .offline-bar {
-  position: fixed; top: calc(var(--safe-top) + 12px); left: 50%; transform: translateX(-50%);
-  z-index: 60; background: rgba(36, 31, 61, .82); color: #fff;
-  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
-  padding: 9px 18px; border-radius: 999px; font-size: 13px; font-weight: 800;
-  box-shadow: var(--shadow-big); border: 1px solid rgba(255, 255, 255, .18);
+  position: fixed; top: var(--viewport-top); left: 0; right: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  height: calc(var(--safe-top) + var(--offline-h)); padding: var(--safe-top) 16px 0;
+  background: rgba(36, 31, 61, .94); color: #fff;
+  font-size: 13px; font-weight: 800; text-align: center;
+  /* The strip's height is a layout constant the panes inset by, so its text has to stay on the
+     one line that height was chosen for. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: var(--shadow-big);
 }
 
 /* ---------- brand ---------- */
@@ -762,7 +770,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {
   .app { display: block; padding: 0; }
-  .sidebar, .chat { position: absolute; inset: 0; border-radius: 0; border: 0; box-shadow: none; }
+  .sidebar, .chat { position: absolute; inset: var(--offline-h) 0 0; border-radius: 0; border: 0; box-shadow: none; }
   .sidebar { padding-left: max(12px, var(--safe-left)); padding-right: max(12px, var(--safe-right)); }
   .sidebar.has-active { display: none; }
   .chat { display: none; }
@@ -845,7 +853,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   .brand-blob { background: linear-gradient(150deg, rgba(255, 255, 255, .2), rgba(255, 255, 255, .06)); }
   .animal.picked { background: rgba(255, 255, 255, .18); }
   .qr { background: #fff; }
-  .toast, .offline-bar { background: rgba(255, 255, 255, .14); }
+  .toast { background: rgba(255, 255, 255, .14); }
   .lightbox-bar .chip-btn { background: rgba(40, 36, 80, .92); color: #f2f0ff; }
   .sheet-title button { border-color: var(--glass-line); }
 }
