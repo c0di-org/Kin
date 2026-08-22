@@ -1057,3 +1057,13 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 @media (max-width: 760px) {
   .choice-row { grid-template-columns: 1fr; }
 }
+
+.link-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.link-field {
+  flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--sub);
+  padding: 10px 12px; border-radius: 16px; border: 1px solid var(--glass-line);
+  background: rgba(255, 255, 255, .5); text-overflow: ellipsis;
+}
+.sheet .onboard-label { margin-top: 10px; }
+.sheet .onboard-label:first-of-type { margin-top: 2px; }
+.choice-row, .pill-row { margin-bottom: 4px; }

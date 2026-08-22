@@ -104,6 +104,12 @@ export function InvitePanel({ identity, conversation, onFlash }: {
       {" "}{REACH[reach].maxUses === 1 ? "It works once." : REACH[reach].maxUses === null ? "It has no limit." : `Up to ${REACH[reach].maxUses} people.`}
       {" "}{until(made.expiresAt)}.
     </p>
+    {/* The link is shown, not only shareable: the share sheet is missing on desktop browsers, and
+        seeing the thing you are about to send somebody is worth more than one row of height. */}
+    <div className="link-row">
+      <input className="link-field" readOnly value={made.link} onFocus={e => e.currentTarget.select()} aria-label="Invite link"/>
+      <button className="chip-btn" onClick={() => { void navigator.clipboard.writeText(made.link); onFlash("Link copied!"); }}>Copy</button>
+    </div>
     <button className="primary" onClick={() => void share()}>Send it 💌</button>
     <button className="link" onClick={() => setMade(null)}>Make another</button>
   </>;

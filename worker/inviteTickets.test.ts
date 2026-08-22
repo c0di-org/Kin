@@ -178,3 +178,19 @@ describe("revoking an invite", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe("what the room is told about a link", () => {
+  it("moves the used count as people come through, not only when it was minted", async () => {
+    await create(f.alice, { maxUses: null });
+    expect((await f.storage.get<any>(`invite:${CODE}`)).uses).toBe(0);
+    await redeem(f.mallory);
+    expect((await f.storage.get<any>(`invite:${CODE}`)).uses).toBe(1);
+  });
+
+  it("does not move it when the same device comes back", async () => {
+    await create(f.alice, { maxUses: null });
+    await redeem(f.mallory);
+    await redeem(f.mallory);
+    expect((await f.storage.get<any>(`invite:${CODE}`)).uses).toBe(1);
+  });
+});

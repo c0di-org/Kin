@@ -126,7 +126,7 @@ export type InviteRole = Exclude<MemberRole, "member">;
 /** What an invite link opens onto, before the joiner has decided to walk through it. */
 export type InvitePreview = {
   code: string;
-  room: { id: string; kind: "group" | "direct"; title: string; spaceId?: string };
+  room: { id: string; kind: "group" | "direct"; title: string; emoji?: string; spaceId?: string };
   inviter: PublicMember;
   role: InviteRole;
   wrappedKey: string;

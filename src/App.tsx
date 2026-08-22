@@ -830,7 +830,12 @@ export default function App() {
     return { visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions, deleted: deletedIds(sortedMsgs) };
   }, [activeMessages]);
   // With one or two chats a list is mostly empty space — show a proper card for each instead.
-  const showCards = sorted.length > 0 && sorted.length <= 3;
+  // Big friendly cards are for the small flat case — a family and a couple of chats. The moment a
+  // space has channels there is a hierarchy to show, and a grid of equal cards is the one shape
+  // that cannot show it, so the list takes over.
+  const tree = useMemo(() => spaceTree(sorted), [sorted]);
+  const showCards = sorted.length > 0 && sorted.length <= 3
+    && !tree.orphans.length && tree.spaces.every(n => !n.channels.length);
   // Reload on every conversation refresh rather than off a digest: a chat can gain messages without
   // its summary changing (history arriving for a chat we just discovered, for one).
   useEffect(() => {
@@ -875,7 +880,6 @@ export default function App() {
 
   const typingNames = typing.map(d => active?.members.find(m => m.deviceId === d)?.displayName).filter(Boolean).map(n => firstName(n!));
   const showIosInstall = isAppleTouchDevice() && !isStandalone();
-  const tree = useMemo(() => spaceTree(sorted), [sorted]);
 
   /** One row of the sidebar, whether it is a space, a channel under one, or a direct chat. */
   const row = (c: Conversation, rolledUpUnread?: number, nested = false) => {
@@ -950,8 +954,12 @@ export default function App() {
           <button className="chat-person" onClick={() => { setConfirming(null); setPanel("members"); }}>
             <ConversationAvatar c={active} self={identity.deviceId} small/>
             <span>
-              <strong>{active.kind === "group" ? `${active.title} 🏡` : active.title}</strong>
-              <small>{typingNames.length ? `${typingNames.join(" and ")} is typing…` : active.kind === "group" ? active.members.map(m => firstName(m.displayName)).join(", ") : "Private chat"}</small>
+              <strong>{active.kind === "group" ? `${active.title} ${active.emoji ?? "🏡"}` : active.title}</strong>
+              <small>{typingNames.length
+                ? `${typingNames.join(" and ")} is typing…`
+                : active.spaceId
+                  ? `${conversations.find(c => c.id === active.spaceId)?.title ?? "Channel"} · ${active.members.length}`
+                  : active.kind === "group" ? active.members.map(m => firstName(m.displayName)).join(", ") : "Private chat"}</small>
             </span>
           </button>
           {active.kind === "group" && isFullMember(active) &&

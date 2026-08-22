@@ -49,7 +49,7 @@ type InviteSummary = {
 type InviteRecord = {
   code: string;
   proof: string;
-  room: { id: string; kind: "group" | "direct"; title: string; spaceId?: string };
+  room: { id: string; kind: "group" | "direct"; title: string; emoji?: string; spaceId?: string };
   inviter: Member;
   role: Exclude<MemberRole, "member">;
   wrappedKey: string;
@@ -343,6 +343,7 @@ export class InviteTicket extends DurableObject<Env> {
           id: String(body.room.id),
           kind: body.room.kind === "direct" ? "direct" : "group",
           title: String(body.room.title ?? "").slice(0, 80),
+          ...(body.room.emoji ? { emoji: String(body.room.emoji).slice(0, 8) } : {}),
           ...(body.room.spaceId ? { spaceId: String(body.room.spaceId) } : {})
         },
         inviter: body.inviter,
@@ -413,8 +414,16 @@ export class InviteTicket extends DurableObject<Env> {
       // Counted only once per device, so that reopening the link on the same phone — which is
       // what happens every time someone taps it again — does not burn a use of a one-use invite.
       if (!returning) {
+        const uses = record.uses + 1;
         await this.ctx.storage.put(`used:${member.deviceId}`, now);
-        await this.ctx.storage.put("record", { ...record, uses: record.uses + 1 });
+        await this.ctx.storage.put("record", { ...record, uses });
+        // The room holds its own copy so members can see what is outstanding without asking every
+        // invite object in turn. It has to move with the real count, or the list quietly lies
+        // about how far a link has already travelled — which is the one thing it is there to say.
+        await room.noteInvite({
+          code: inviteCode, role: record.role, createdAt: record.createdAt,
+          expiresAt: record.expiresAt, maxUses: record.maxUses, uses
+        });
       }
       return json({ ok: true, room: record.room, role: record.role });
     }

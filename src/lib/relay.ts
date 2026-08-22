@@ -93,7 +93,7 @@ export async function claimPair(code: string, claimToken: string): Promise<PairP
  */
 export async function createInvite(identity: LocalIdentity, code: string, ticket: {
   proof: string;
-  room: { id: string; kind: "group" | "direct"; title: string; spaceId?: string };
+  room: { id: string; kind: "group" | "direct"; title: string; emoji?: string; spaceId?: string };
   inviter: PublicMember;
   role: InviteRole;
   wrappedKey: string;

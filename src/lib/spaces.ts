@@ -153,6 +153,7 @@ export async function mintInvite(
       id: conversation.id,
       kind: conversation.kind,
       title: conversation.title,
+      ...(conversation.emoji ? { emoji: conversation.emoji } : {}),
       ...(conversation.spaceId ? { spaceId: conversation.spaceId } : {})
     },
     inviter: publicMember(identity),
@@ -195,6 +196,7 @@ export async function acceptInvite(
     members: [card, preview.inviter],
     createdAt: Date.now(),
     role: result.role,
+    ...(preview.room.emoji ? { emoji: preview.room.emoji } : {}),
     ...(preview.room.spaceId ? { spaceId: preview.room.spaceId } : {}),
     ...(profile ? { profile } : {})
   };

@@ -227,3 +227,26 @@ describe("redact", () => {
     expect(redact(once).deletedAt).toBe(once.deletedAt);
   });
 });
+
+describe("opening history as somebody who just arrived", () => {
+  it("drops a message from a sender the roster does not hold yet", async () => {
+    // The bug this pins: history used to be ingested before the roster was pulled. An envelope
+    // only opens against a member we already hold, and history is fetched once — so a device that
+    // walked in on an invite link, knowing only whoever invited it, silently lost every message
+    // from everybody else, permanently. Connect order is what fixes it; this is the trap itself.
+    const ada = await generateIdentity("Ada");
+    const bo = await generateIdentity("Bo");
+    const key = randomKey();
+    const env = await signEnvelope(bo, await encryptPayload("room-1", key, bo.deviceId, { type: "text", text: "hello" }));
+
+    const withoutBo: Conversation = {
+      id: "room-1", kind: "group", title: "Japan trip", key,
+      members: [publicMember(ada)], createdAt: 0
+    };
+    expect(await openEnvelope(withoutBo, env)).toBeNull();
+
+    const withBo: Conversation = { ...withoutBo, members: [publicMember(ada), publicMember(bo)] };
+    const opened = await openEnvelope(withBo, env);
+    expect(opened?.message.payload.text).toBe("hello");
+  });
+});

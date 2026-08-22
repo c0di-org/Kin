@@ -70,8 +70,13 @@ export function useConversationSync({ identity, conversations, activeId, online,
     if (connecting.current.has(conversationId) || sockets.current.has(conversationId)) return;
     connecting.current.add(conversationId);
     try {
-      try { await ingestHistory(conversationId, await roomHistory(me, conversationId)); } catch { /* offline */ }
+      // Roster first, then history. An envelope is only opened if it verifies against a member we
+      // already hold, and history is fetched once — so ingesting first silently drops every
+      // message from anyone this device has not met yet, permanently. A device that has been in
+      // the room for years never notices; one that just walked in on an invite link knows only
+      // whoever invited it, and would find the room empty of everybody else.
       await pullRoster(me, conversationId);
+      try { await ingestHistory(conversationId, await roomHistory(me, conversationId)); } catch { /* offline */ }
 
       const socket = new WebSocket(await websocketUrl(me, conversationId));
       socket.onopen = () => { retries.current.delete(conversationId); };
