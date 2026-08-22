@@ -216,3 +216,68 @@ export function anonymousProfile(): { displayName: string; avatarSeed: string } 
   const at = Math.floor(Math.random() * CREATURES.length);
   return { displayName: `Guest ${CREATURES[at]}`, avatarSeed: `e:${FACES[at]}` };
 }
+
+// ---------- arranging what a device holds ----------
+
+export type SpaceNode = {
+  space: Conversation;
+  channels: Conversation[];
+  /** Everything unread anywhere under this space, which is what the sidebar badge counts. */
+  unread: number;
+  lastMessageAt: number;
+};
+
+const activity = (c: Conversation): number => c.lastMessageAt ?? c.createdAt;
+
+/**
+ * Sort a flat list of conversations into the shape the sidebar shows.
+ *
+ * A group with no channels stays exactly what it was before channels existed — one row, no
+ * nesting, no hint that a hierarchy is available. That is deliberate: the family case should not
+ * pay for the project case, and a space only starts looking like a space once somebody has given
+ * it a reason to.
+ *
+ * A channel whose space this device does not hold comes back as an orphan rather than being
+ * dropped, because that is what being invited straight into one channel looks like from inside.
+ */
+export function spaceTree(conversations: Conversation[]): {
+  spaces: SpaceNode[];
+  directs: Conversation[];
+  orphans: Conversation[];
+} {
+  const spaces = new Map<string, SpaceNode>();
+  const directs: Conversation[] = [];
+  const channels: Conversation[] = [];
+
+  for (const c of conversations) {
+    if (c.kind === "direct") directs.push(c);
+    else if (c.spaceId) channels.push(c);
+    else spaces.set(c.id, { space: c, channels: [], unread: c.unread ?? 0, lastMessageAt: activity(c) });
+  }
+
+  const orphans: Conversation[] = [];
+  for (const channel of channels) {
+    const node = spaces.get(channel.spaceId!);
+    if (!node) { orphans.push(channel); continue; }
+    node.channels.push(channel);
+    node.unread += channel.unread ?? 0;
+    node.lastMessageAt = Math.max(node.lastMessageAt, activity(channel));
+  }
+
+  for (const node of spaces.values()) node.channels.sort((a, b) => activity(b) - activity(a));
+  return {
+    spaces: [...spaces.values()].sort((a, b) => b.lastMessageAt - a.lastMessageAt),
+    directs: directs.sort((a, b) => activity(b) - activity(a)),
+    orphans: orphans.sort((a, b) => activity(b) - activity(a))
+  };
+}
+
+/** Can this device do the things only a full member may — invite, add channels, rename? */
+export function isFullMember(c: Conversation | null): boolean {
+  return !!c && (c.role ?? "member") === "member";
+}
+
+/** A viewer came to look. The relay refuses their envelopes; the composer should not offer. */
+export function canPost(c: Conversation | null): boolean {
+  return !!c && (c.role ?? "member") !== "viewer";
+}

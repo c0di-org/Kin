@@ -14,7 +14,7 @@ beforeEach(async () => {
   f = await newFixture(ConversationRoom);
   await f.seed();
   inviteStorage = new FakeStorage();
-  invite = new InviteTicket(fakeCtx(inviteStorage), f.env);
+  invite = new InviteTicket(fakeCtx(inviteStorage) as any, f.env);
 });
 
 const path = (tail = "") => `/api/invite/${CODE}${tail}`;

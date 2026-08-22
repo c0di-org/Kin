@@ -81,7 +81,7 @@ describe("walking into a channel", () => {
     await f.env.ROOMS.storages.get(SPACE)!.put(`member:${f.bob.deviceId}`, { ...f.bob.member(), role: "guest" });
     const channel = f.env.ROOMS.get(CHANNEL);
     await channel.fetch(await signedRequest(f.bob, "POST", channelPath("/join"), { ...f.bob.member(), role: "member" }));
-    const stored = await f.env.ROOMS.storages.get(CHANNEL)!.get<any>(`member:${f.bob.deviceId}`);
+    const stored: any = await f.env.ROOMS.storages.get(CHANNEL)!.get(`member:${f.bob.deviceId}`);
     expect(stored.role).toBe("guest");
   });
 

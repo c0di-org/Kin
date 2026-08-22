@@ -6,12 +6,12 @@ const FLOATERS = ["🎈", "⭐", "🦋", "🌈", "🎨", "🧸", "🌻", "🪁",
 
 export default function Onboarding({ pairCode, create, join }: {
   pairCode: string;
-  create(name: string, avatar: string, familyName: string): Promise<void>;
+  create(name: string, avatar: string, groupName: string): Promise<void>;
   join(name: string, avatar: string, code: string): Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [avatar, setAvatar] = useState(() => ANIMALS[Math.floor(Math.random() * ANIMALS.length)]);
-  const [familyName, setFamilyName] = useState("");
+  const [groupName, setGroupName] = useState("");
   const [code, setCode] = useState(pairCode);
   const [joining, setJoining] = useState(!!pairCode);
   const [busy, setBusy] = useState(false);
@@ -20,7 +20,7 @@ export default function Onboarding({ pairCode, create, join }: {
   const go = async (): Promise<void> => {
     if (!ok || busy) return;
     setBusy(true);
-    try { joining ? await join(name, avatar, code) : await create(name, avatar, familyName.trim() || "Family"); }
+    try { joining ? await join(name, avatar, code) : await create(name, avatar, groupName.trim() || "Family"); }
     finally { setBusy(false); }
   };
 
@@ -33,7 +33,7 @@ export default function Onboarding({ pairCode, create, join }: {
       <div className="big-brand">
         <span className="brand-blob">{avatar}</span>
         <strong>Kin</strong>
-        <p>Your family’s own cozy corner — private, playful, just for you.</p>
+        <p>A cosy corner for your people — private, playful, and yours.</p>
       </div>
       <label className="onboard-label">Pick your animal</label>
       <div className="animal-grid">
@@ -42,12 +42,12 @@ export default function Onboarding({ pairCode, create, join }: {
       <input autoFocus placeholder="What’s your name?" maxLength={24} value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === "Enter" && void go()} />
       {joining
         ? <input className="code-input" placeholder="Invite code" value={code} onChange={e => setCode(e.target.value.toUpperCase())} onKeyDown={e => e.key === "Enter" && void go()} />
-        : <input placeholder="Family name (optional)" maxLength={24} value={familyName} onChange={e => setFamilyName(e.target.value)} onKeyDown={e => e.key === "Enter" && void go()} />}
+        : <input placeholder="Name your group — Family, Book club…" maxLength={24} value={groupName} onChange={e => setGroupName(e.target.value)} onKeyDown={e => e.key === "Enter" && void go()} />}
       <button className="primary" disabled={busy || !ok} onClick={() => void go()}>
-        {busy ? "One sec…" : joining ? "Join my family 🎉" : "Start our family 🎉"}
+        {busy ? "One sec…" : joining ? "Join them 🎉" : "Start our group 🎉"}
       </button>
       <button className="link" onClick={() => setJoining(!joining)}>
-        {joining ? "Start a new family instead" : "I have an invite code"}
+        {joining ? "Start a new group instead" : "I have an invite code"}
       </button>
     </div>
   </div>;
