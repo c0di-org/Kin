@@ -373,7 +373,7 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   background: var(--paper); border: 1px solid rgba(255, 255, 255, .8);
   box-shadow: var(--shadow), var(--gloss);
   white-space: pre-wrap; word-break: break-word; font-size: 16.5px; line-height: 1.42;
-  animation: bubble-in .34s cubic-bezier(.25, 1.5, .5, 1); transform-origin: bottom;
+  transform-origin: bottom;
   min-width: 78px;
 }
 .mine .bubble {
@@ -386,6 +386,10 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   background: linear-gradient(180deg, rgba(255, 255, 255, .12), rgba(255, 255, 255, 0) 58%);
 }
 .theirs .bubble { border-bottom-left-radius: 9px; transform-origin: bottom left; }
+/* Only a message that arrived while you were looking gets to make an entrance. Opening a chat
+   mounts the whole backlog in one go, and this animation on all of it at once was the thread
+   appearing to pop itself into existence a screenful at a time. */
+.bubble.entering { animation: bubble-in .34s cubic-bezier(.25, 1.5, .5, 1); }
 .row.grouped .bubble { animation: none; }
 .bubble.pending { opacity: .88; }
 .bubble.failed { outline: 2px dashed #ff6b8a; outline-offset: 2px; cursor: pointer; }
