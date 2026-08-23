@@ -728,11 +728,18 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .danger-btn:hover:not(:disabled) { transform: translateY(-2px) scale(1.04); }
 .danger-btn:disabled { opacity: .5; }
 
-.paired { display: grid; justify-items: center; gap: 10px; padding: 26px 0 10px; text-align: center; }
-.paired > b { font-size: 56px; animation: pop-in .55s cubic-bezier(.3, 1.7, .5, 1); }
-.paired strong { font-size: 22px; font-weight: 1000; }
-.paired > div { font-size: 36px; letter-spacing: .14em; }
-.paired small { color: var(--sub); font-weight: 600; max-width: 300px; line-height: 1.5; }
+.safety { display: grid; justify-items: center; gap: 12px; padding: 22px 0 10px; text-align: center; }
+.safety > b { font-size: 56px; animation: pop-in .55s cubic-bezier(.3, 1.7, .5, 1); }
+.safety strong { font-size: 22px; font-weight: 1000; }
+/* Two rows, kept as rows: the pictures are compared position by position against another phone,
+   so a line that reflows to a different width on each device defeats the whole exercise. */
+.safety-rows {
+  display: grid; gap: 8px; padding: 16px 14px; border-radius: 20px;
+  background: var(--paper-2); border: 1px solid var(--glass-line);
+}
+.safety-rows span { font-size: 27px; letter-spacing: .1em; white-space: nowrap; }
+.safety small { color: var(--sub); font-weight: 600; max-width: 320px; line-height: 1.5; }
+@media (max-width: 380px) { .safety-rows span { font-size: 22px; letter-spacing: .06em; } }
 .profile { width: 100%; display: flex; align-items: center; gap: 16px; padding: 6px 8px 18px; text-align: left; border-radius: 22px; transition: background .16s; }
 .profile:hover { background: rgba(255, 255, 255, .5); }
 .profile span { display: flex; flex-direction: column; min-width: 0; }

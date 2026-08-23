@@ -42,19 +42,24 @@ const card = id => ({
   dhPublicJwk: id.dhPublicJwk, signPublicJwk: id.signPublicJwk
 });
 
-async function signed(id, method, path, payload) {
-  const body = payload === undefined ? "" : JSON.stringify(payload);
+/** The X-Kin-* headers on their own, for the requests that are not JSON bodies. */
+async function signHeaders(id, method, path, body = "", bodyHashOverride) {
   const ts = String(Date.now());
   const nonce = b64(crypto.getRandomValues(new Uint8Array(8)));
-  const bodyHash = await sha256(body);
+  const bodyHash = bodyHashOverride ?? await sha256(body);
   const canonical = [method.toUpperCase(), path, ts, nonce, bodyHash].join("\n");
   const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, id.signPrivate, enc.encode(canonical));
+  return {
+    "X-Kin-Device": id.deviceId, "X-Kin-Time": ts, "X-Kin-Nonce": nonce,
+    "X-Kin-Body": bodyHash, "X-Kin-Signature": b64(sig)
+  };
+}
+
+async function signed(id, method, path, payload) {
+  const body = payload === undefined ? "" : JSON.stringify(payload);
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: {
-      "X-Kin-Device": id.deviceId, "X-Kin-Time": ts, "X-Kin-Nonce": nonce,
-      "X-Kin-Body": bodyHash, "X-Kin-Signature": b64(sig), "Content-Type": "application/json"
-    },
+    headers: { ...(await signHeaders(id, method, path, body)), "Content-Type": "application/json" },
     body: body || undefined
   });
   return res;
@@ -168,6 +173,22 @@ res = await signed(bo, "PUT", `/api/invite/${bosCode}`, {
 });
 check("a guest cannot mint invites of their own", res.status === 403, `status ${res.status}`);
 
+// ...nor get to the same place the long way round. Enrolling a device directly, or evicting the
+// people who could revoke the link, would each undo the limit the role is there to impose.
+const tag = await identity("Tag");
+res = await signed(bo, "POST", `/api/rooms/${spaceId}/members`, card(tag));
+check("a guest cannot enrol a device instead", res.status === 403, `status ${res.status}`);
+res = await signed(tag, "GET", `/api/rooms/${spaceId}/history`);
+check("and the device they tried to let in stays out", res.status === 401, `status ${res.status}`);
+
+res = await signed(bo, "DELETE", `/api/rooms/${spaceId}/members/${ada.deviceId}`);
+check("a guest cannot evict a full member", res.status === 403, `status ${res.status}`);
+
+// Leaving, though, is nobody's to withhold — so Bo goes back in afterwards.
+res = await signed(bo, "DELETE", `/api/rooms/${spaceId}/members/${bo.deviceId}`);
+check("a guest can still leave", res.ok, `status ${res.status}`);
+await signed(bo, "POST", `/api/invite/${code}/redeem`, { proof: opened.proof, member: { ...card(bo), displayName: "Guest Otter" } });
+
 // 7. A one-use link is spent, and holding only the code gets nobody in.
 const cass = await identity("Cass");
 res = await signed(cass, "POST", `/api/invite/${code}/redeem`, { proof: opened.proof, member: card(cass) });
@@ -205,6 +226,28 @@ check("Ada revokes the open link", res.ok, `status ${res.status}`);
 const eve = await identity("Eve");
 res = await signed(eve, "POST", `/api/invite/${openCode}/redeem`, { proof: (await openInvite(openCode, openSecret, openSeal.wrappedKey, openSeal.iv)).proof, member: card(eve) });
 check("a revoked link lets nobody else in", res.status === 410, `status ${res.status}`);
+
+// 10. A kept room can be emptied again, which is what "delete something to make room" assumes.
+const bytes = new Uint8Array(4096).fill(9);
+const digest = b64(await crypto.subtle.digest("SHA-256", bytes));
+const fileId = crypto.randomUUID();
+const filePath = `/api/rooms/${channelId}/files/${fileId}`;
+res = await fetch(`${base}${filePath}`, {
+  method: "PUT",
+  headers: { ...(await signHeaders(ada, "PUT", filePath, "", digest)), "Content-Type": "application/octet-stream" },
+  body: bytes
+});
+check("Ada puts a photo in the kept channel", res.status === 201, `status ${res.status}`);
+res = await signed(ada, "DELETE", filePath);
+check("and can take it back out again", res.ok, `status ${res.status}`);
+res = await signed(ada, "GET", filePath);
+check("the relay no longer has it", res.status === 404, `status ${res.status}`);
+
+// 11. A malformed timestamp is refused rather than sliding past a comparison NaN always loses.
+res = await fetch(`${base}/api/rooms/${spaceId}/members`, {
+  headers: { ...(await signHeaders(ada, "GET", `/api/rooms/${spaceId}/members`, "")), "X-Kin-Time": "not-a-time" }
+});
+check("a timestamp that is not a number is refused", res.status === 401, `status ${res.status}`);
 
 console.log(failures ? `\n${failures} check(s) failed` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

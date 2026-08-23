@@ -31,6 +31,9 @@ export class FakeStorage {
   async deleteAll(): Promise<void> { this.rows.clear(); }
   async getAlarm(): Promise<number | null> { return this.alarm; }
   async setAlarm(time: number): Promise<void> { this.alarm = time; }
+  async deleteAlarm(): Promise<void> { this.alarm = null; }
+  /** The runtime clears an alarm as it fires; tests that drive `alarm()` by hand have to say so. */
+  fireAlarm(): void { this.alarm = null; }
 
   keys(prefix = ""): string[] {
     return [...this.rows.keys()].filter(k => k.startsWith(prefix)).sort();
@@ -78,6 +81,32 @@ async function drain(body: ReadableStream | ArrayBuffer | Uint8Array | null): Pr
   let at = 0;
   for (const c of chunks) { out.set(c, at); at += c.byteLength; }
   return out;
+}
+
+/**
+ * A hibernating WebSocket, faithful on the one point tests get wrong: the runtime drops a socket
+ * from `getWebSockets()` once it is closed. A fake that merely records the call will happily go on
+ * delivering to it, and then agree that eviction works when it does not.
+ */
+export function fakeSocket(deviceId: string, pool: unknown[]) {
+  const ws = {
+    deviceId,
+    sent: [] as string[],
+    closed: false,
+    deserializeAttachment: () => ({ deviceId }),
+    serializeAttachment: () => {},
+    send(text: string) {
+      if (ws.closed) throw new Error("socket is closed");
+      ws.sent.push(text);
+    },
+    close() {
+      ws.closed = true;
+      const at = pool.indexOf(ws);
+      if (at >= 0) pool.splice(at, 1);
+    }
+  };
+  pool.push(ws);
+  return ws;
 }
 
 export function fakeCtx(storage = new FakeStorage(), sockets: unknown[] = []) {

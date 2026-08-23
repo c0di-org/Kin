@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyRoster, mergeMembers, sameDeviceKeys } from "./roster";
+import { applyRoster, knownSenders, mergeMembers, sameDeviceKeys } from "./roster";
 import type { Conversation, PublicMember } from "./types";
 
 const member = (deviceId: string, displayName: string, seed: string): PublicMember => ({
@@ -88,5 +88,44 @@ describe("applyRoster", () => {
     const direct: Conversation = { ...conv, kind: "direct" };
     const { conversation } = applyRoster(direct, [alice], { authoritative: true });
     expect(conversation.members.map(m => m.deviceId).sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("members who have left", () => {
+  const card = (deviceId: string, x: string): PublicMember => ({
+    deviceId, displayName: deviceId, avatarSeed: "s",
+    dhPublicJwk: { kty: "EC", crv: "P-256", x, y: "y" },
+    signPublicJwk: { kty: "EC", crv: "P-256", x, y: "y" }
+  });
+  const room = (members: PublicMember[]): Conversation => ({
+    id: "r", kind: "group", title: "Family", key: "k", members, createdAt: 0
+  });
+
+  it("keeps a departed card so their messages still verify", () => {
+    const [ann, bo] = [card("ann", "a"), card("bo", "b")];
+    const { conversation } = applyRoster(room([ann, bo]), [ann], { authoritative: true });
+    expect(conversation.members.map(m => m.deviceId)).toEqual(["ann"]);
+    // The roster is the relay's to report and nobody signs it. Letting go of the key would hand it
+    // a way to make everything somebody ever said fail verification, and so silently vanish.
+    expect(conversation.pastMembers?.map(m => m.deviceId)).toEqual(["bo"]);
+  });
+
+  it("does not lose earlier departures when somebody else leaves", () => {
+    const [ann, bo, cai] = [card("ann", "a"), card("bo", "b"), card("cai", "c")];
+    const first = applyRoster(room([ann, bo, cai]), [ann, cai], { authoritative: true }).conversation;
+    const second = applyRoster(first, [ann], { authoritative: true }).conversation;
+    expect(second.pastMembers?.map(m => m.deviceId).sort()).toEqual(["bo", "cai"]);
+  });
+
+  it("does not shed anybody on a single-card update", () => {
+    const [ann, bo] = [card("ann", "a"), card("bo", "b")];
+    const { conversation } = applyRoster(room([ann, bo]), [ann]);
+    expect(conversation.members).toHaveLength(2);
+    expect(conversation.pastMembers).toBeUndefined();
+  });
+
+  it("counts both the present and the departed as senders we will check", () => {
+    const [ann, bo] = [card("ann", "a"), card("bo", "b")];
+    expect(knownSenders({ ...room([ann]), pastMembers: [bo] }).map(m => m.deviceId)).toEqual(["ann", "bo"]);
   });
 });

@@ -254,12 +254,24 @@ describe("removing a member", () => {
     expect(await f.storage.get(`member:${f.alice.deviceId}`)).toBeDefined();
   });
 
-  it("keeps the last member, so the room cannot be orphaned", async () => {
+  it("closes the room when its last member leaves", async () => {
     await f.seed();
     await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.bob.deviceId}`)));
     const res = await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.alice.deviceId}`)));
-    expect(res.status).toBe(409);
-    expect(await f.storage.get(`member:${f.alice.deviceId}`)).toBeDefined();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ closed: true });
+    // Refusing instead stranded a group that was made and never shared: nobody could leave it,
+    // and there was no other way to be rid of it.
+    expect(await f.storage.get("meta")).toBeUndefined();
+    expect(f.storage.keys()).toHaveLength(0);
+  });
+
+  it("takes a closed room's attachments out of the bucket with it", async () => {
+    await f.seed("group", [f.alice]);
+    await f.storage.put("kept:f1", { fileId: "f1", key: "rooms/r/f1", expiresAt: 0, bytes: 10 });
+    await f.env.ATTACHMENTS.objects.set("rooms/r/f1", new Uint8Array(10));
+    await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.alice.deviceId}`)));
+    expect(f.env.ATTACHMENTS.objects.has("rooms/r/f1")).toBe(false);
   });
 
   it("is idempotent for a device that has already gone", async () => {

@@ -212,11 +212,38 @@ export async function openInvite(code: string, secret: string, wrappedKey: strin
   return { proof, roomKey: b64(clear) };
 }
 
-const EMOJI = ["🌿","🌙","⭐","🍓","🐳","🦊","🌈","🍋","🪁","🐝","🍀","🫐","🐢","🌸","☀️","🎈","🦋","🍉","🐬","🌻","🥝","🧸","🏕️","🍪"];
+/**
+ * Thirty-two pictures, so each one drawn is exactly five bits.
+ *
+ * The old table held twenty-four, which is not a power of two: `byte % 24` favours the first
+ * eight of them, so the code carried slightly less than it appeared to even before you counted
+ * how few of them there were.
+ */
+const EMOJI = [
+  "🌿","🌙","⭐","🍓","🐳","🦊","🌈","🍋","🪁","🐝","🍀","🫐","🐢","🌸","☀️","🎈",
+  "🦋","🍉","🐬","🌻","🥝","🧸","🏕️","🍪","🍄","🐧","🚲","🎸","🪺","🧁","🐌","🪴"
+];
+
+/** Eight pictures — forty bits — naming one device's public key and nothing else. */
+async function fingerprint(member: PublicMember): Promise<string> {
+  const hash = unb64(await sha256(`kin-safety-v2:${JSON.stringify(member.dhPublicJwk)}`));
+  return Array.from(hash.slice(0, 8), n => EMOJI[n % EMOJI.length]).join(" ");
+}
+
+/**
+ * The check two people make in person: do both phones show the same pictures?
+ *
+ * It is a fingerprint of each device's key set side by side, rather than one hash of the pair,
+ * and that shape is the whole of its strength. Against a hash of the pair, a relay in the middle
+ * needs only `H(alice, mine)` to equal `H(mine', bob)` — and it picks both of those itself, so it
+ * is hunting a collision between two values it controls, which lands at half the bits. Against
+ * side-by-side fingerprints it has to hit Bob's exact picture, and then Alice's: two preimages at
+ * the full forty bits each, which is not a search anybody finishes in a pairing window.
+ *
+ * Sorted, so both phones read the same two lines in the same order.
+ */
 export async function safetyCode(a: PublicMember, b: PublicMember): Promise<string> {
-  const fingerprints = [JSON.stringify(a.dhPublicJwk), JSON.stringify(b.dhPublicJwk)].sort().join("|");
-  const hash = unb64(await sha256(fingerprints));
-  return Array.from(hash.slice(0, 4), n => EMOJI[n % EMOJI.length]).join(" ");
+  return (await Promise.all([fingerprint(a), fingerprint(b)])).sort().join("\n");
 }
 
 export async function signRequest(identity: LocalIdentity, method: string, path: string, body = "", bodyHashOverride?: string): Promise<Record<string, string>> {

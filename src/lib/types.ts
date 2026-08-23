@@ -51,6 +51,15 @@ export type Conversation = {
   unread?: number;
   /** Device ids whose keys changed under us — a warning that outlives a reload. */
   keyAlerts?: string[];
+  /**
+   * Cards of people who have left, kept only so their messages still verify.
+   *
+   * The roster is the relay's to report, and it is not signed by anybody — so a relay that felt
+   * like it could drop a name from it, and every message that person ever sent would stop
+   * verifying and silently vanish from a thread we already hold. What somebody said does not
+   * become unsaid when they leave, so their key stays here after their row goes.
+   */
+  pastMembers?: PublicMember[];
 };
 
 export type AttachmentPayload = {
@@ -110,7 +119,6 @@ export type PairStatus = {
 export type PairPackage = {
   creator: PublicMember;
   group: { id: string; title: string; wrappedKey: string; wrapIv: string };
-  safetyCode: string;
 };
 
 /** A channel as the relay holds it: an id, and a name only the space's members can read. */

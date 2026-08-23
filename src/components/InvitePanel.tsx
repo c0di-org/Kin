@@ -50,7 +50,7 @@ export function InvitePanel({ identity, conversation, onFlash }: {
   const [role, setRole] = useState<InviteRole>("guest");
   const [reach, setReach] = useState(0);
   const [life, setLife] = useState(1);
-  const [made, setMade] = useState<{ link: string; qr: string; expiresAt: number } | null>(null);
+  const [made, setMade] = useState<{ code: string; link: string; qr: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [outstanding, setOutstanding] = useState<InviteSummary[]>([]);
 
@@ -68,6 +68,7 @@ export function InvitePanel({ identity, conversation, onFlash }: {
         role, maxUses: REACH[reach].maxUses, ttl: LIFE[life].ttl
       });
       setMade({
+        code: invite.code,
         link: invite.link,
         expiresAt: invite.expiresAt,
         qr: await QRCode.toDataURL(invite.link, { margin: 1, width: 260 })
@@ -91,7 +92,9 @@ export function InvitePanel({ identity, conversation, onFlash }: {
     try {
       await revokeInvite(identity, code, publicMember(identity));
       setOutstanding(x => x.filter(i => i.code !== code));
-      if (made) setMade(null);
+      // Only if it is *this* link. Clearing on any revocation wiped a link that had just been
+      // made off the screen before it had been sent to anybody.
+      if (made?.code === code) setMade(null);
       onFlash("That link won’t work any more");
     } catch { onFlash("Couldn’t turn that link off"); }
   }

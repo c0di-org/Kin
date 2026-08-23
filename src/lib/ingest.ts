@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatPayload, CipherEnvelope, Conversation, PublicMember } from "./types";
 import { decryptPayload, verifyEnvelope } from "./crypto";
+import { knownSenders } from "./roster";
 import { previewLabel } from "./media";
 
 /** A message that verified and decrypted, alongside the roster entry that signed it. */
@@ -15,7 +16,9 @@ export const firstName = (s: string): string => s.trim().split(/\s+/)[0] ?? s;
  * surfacing — on a shared relay all three are things other people's traffic does.
  */
 export async function openEnvelope(conv: Conversation, env: CipherEnvelope): Promise<OpenedMessage | null> {
-  const sender = conv.members.find(m => m.deviceId === env.senderDeviceId);
+  // Past members count: somebody leaving does not unsay what they said, and a history replay that
+  // only knew the current roster would quietly drop every message they ever sent.
+  const sender = knownSenders(conv).find(m => m.deviceId === env.senderDeviceId);
   if (!sender || !(await verifyEnvelope(env, sender))) return null;
   try {
     const payload = await decryptPayload(env, conv.key);

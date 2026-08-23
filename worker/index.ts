@@ -24,7 +24,8 @@ type Envelope = {
   signature: string;
 };
 
-type FileRecord = { fileId: string; key: string; expiresAt: number };
+/** `bytes` and `by` are what a later deletion needs: how much to give back, and whose it was. */
+type FileRecord = { fileId: string; key: string; expiresAt: number; bytes?: number; by?: string };
 type RoomMeta = {
   id: string;
   kind: "group" | "direct";
@@ -61,7 +62,15 @@ type InviteRecord = {
   revoked?: boolean;
 };
 type PairRecord = { code: string; creator: Member; creatorToken: string; group: { id: string; title: string }; joiner?: Member; joinerToken?: string; complete?: boolean };
-type PairPackage = { creator: Member; group: { id: string; title: string; wrappedKey: string; wrapIv: string }; safetyCode: string };
+/**
+ * What the inviter leaves for the joiner to collect.
+ *
+ * It carried a `safetyCode` once, which is exactly the thing a safety code must never be:
+ * a value that travelled through the party it is meant to catch. Both ends work theirs out
+ * from the keys in hand now, and the field is gone rather than merely unread, so nothing can
+ * quietly start trusting it again.
+ */
+type PairPackage = { creator: Member; group: { id: string; title: string; wrappedKey: string; wrapIv: string } };
 
 type Env = {
   ROOMS: DurableObjectNamespace<ConversationRoom>;
@@ -88,6 +97,42 @@ const MAX_CHANNELS = 64;
  */
 const KEEP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const KEEP_MAX_MESSAGES = 20_000;
+
+/**
+ * Is this `X-Kin-Time` inside the replay window?
+ *
+ * The parse has to be checked, not just performed. `Number("nonsense")` is NaN, and every
+ * comparison against NaN is false — so a bare `Math.abs(...) > MAX_SKEW` waves a malformed
+ * timestamp straight through. Worse, the NaN then travels: it is stored as the nonce's expiry,
+ * and the retention sweep reads those to decide when to run again, so one such request leaves a
+ * room that never schedules another alarm and never expires anything.
+ */
+function withinSkew(time: string | null): boolean {
+  const signedAt = Number(time);
+  return Number.isFinite(signedAt) && Math.abs(Date.now() - signedAt) <= MAX_SKEW;
+}
+
+/**
+ * Can this member do the things a link guest or viewer may not?
+ *
+ * Roles are only worth what the relay refuses, so every write that a guest is told they cannot
+ * make has to ask. Absent means full member: rooms predate roles, and their members have none.
+ */
+function isFullMember(member: Member): boolean {
+  return (member.role ?? "member") === "member";
+}
+
+/** A member card cut down to what the relay will store, wherever the card came in from. */
+function trimMember(member: Member, role?: MemberRole): Member {
+  return {
+    deviceId: String(member.deviceId).slice(0, 64),
+    displayName: String(member.displayName ?? "").slice(0, 64),
+    avatarSeed: String(member.avatarSeed ?? "").slice(0, 64),
+    dhPublicJwk: member.dhPublicJwk,
+    signPublicJwk: member.signPublicJwk,
+    ...(role ? { role } : {})
+  };
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
@@ -164,7 +209,7 @@ async function verifySignedBy(
   const sig = request.headers.get("X-Kin-Signature");
   if (!device || !time || !nonce || !claimedHash || !sig) return false;
   if (device !== member.deviceId) return false;
-  if (Math.abs(Date.now() - Number(time)) > MAX_SKEW) return false;
+  if (!withinSkew(time)) return false;
   if (claimedHash !== bodyHash) return false;
   const path = new URL(request.url).pathname;
   const canonical = [request.method.toUpperCase(), path, time, nonce, claimedHash].join("\n");
@@ -622,7 +667,7 @@ export class ConversationRoom extends DurableObject<Env> {
     const claimedHash = request.headers.get("X-Kin-Body");
     const sig = request.headers.get("X-Kin-Signature");
     if (!device || !time || !nonce || !claimedHash || !sig) return null;
-    if (Math.abs(Date.now() - Number(time)) > MAX_SKEW) return null;
+    if (!withinSkew(time)) return null;
     if (claimedHash !== bodyHash) return null;
     const member = await signer(device);
     if (!member) return null;
@@ -646,7 +691,7 @@ export class ConversationRoom extends DurableObject<Env> {
     const body = url.searchParams.get("body");
     const sig = url.searchParams.get("sig");
     if (!device || !time || !nonce || !body || !sig) return null;
-    if (Math.abs(Date.now() - Number(time)) > MAX_SKEW) return null;
+    if (!withinSkew(time)) return null;
     const member = await this.member(device);
     if (!member) return null;
     const canonical = ["GET", url.pathname, time, nonce, body].join("\n");
@@ -694,14 +739,19 @@ export class ConversationRoom extends DurableObject<Env> {
   private async storeEnvelope(envelope: Envelope, meta: RoomMeta): Promise<boolean> {
     const key = `msg:${String(envelope.createdAt).padStart(16, "0")}:${envelope.id}`;
     if (await this.ctx.storage.get(key)) return false;
+    // The storage key sorts by time, which is what history replay wants and what deleting one
+    // message by id does not — hence the index, so a retraction is a lookup rather than a scan
+    // over everything a kept room has ever held.
     if (meta.keep) {
       const count = (await this.ctx.storage.get<number>("keptMessages")) ?? 0;
       if (count >= KEEP_MAX_MESSAGES) return false;
       await this.ctx.storage.put(key, envelope);
+      await this.ctx.storage.put(`msgkey:${envelope.id}`, key);
       await this.ctx.storage.put("keptMessages", count + 1);
       return true;
     }
     await this.ctx.storage.put(key, envelope);
+    await this.ctx.storage.put(`msgkey:${envelope.id}`, key);
     await this.scheduleSweep(envelope.expiresAt);
     return true;
   }
@@ -795,7 +845,10 @@ export class ConversationRoom extends DurableObject<Env> {
       ...(body.keep ? { keep: true } : {})
     };
     await this.ctx.storage.put("meta", meta);
-    for (const member of members) await this.ctx.storage.put(`member:${member.deviceId}`, member);
+    // Trimmed on the way in, like every other card: this is the one path that took a whole list of
+    // them at once, and it took them verbatim — 64 unbounded display names, and a creator free to
+    // write a standing for people who are not there to disagree.
+    for (const member of members) await this.ctx.storage.put(`member:${member.deviceId}`, trimMember(member));
     return json(meta, 201);
   }
 
@@ -806,18 +859,25 @@ export class ConversationRoom extends DurableObject<Env> {
 
     const existing = await this.member(incoming.deviceId);
     if (existing) {
-      // Introducing somebody new is the pairing flow and stays open to any member. Rewriting a
-      // card that already exists is not: only its owner may touch it, and never its keys. A
-      // device that needs fresh keys gets a fresh deviceId, so a key change on a known member is
+      // Rewriting a card that already exists is only ever its owner's to do, and never its keys.
+      // A device that needs fresh keys gets a fresh deviceId, so a key change on a known member is
       // always somebody swapping themselves in as that person.
       if (requester.deviceId !== incoming.deviceId) return error("Not your member card", 403);
       if (!sameJwk(existing.signPublicJwk, incoming.signPublicJwk)) return error("Device keys are immutable", 403);
       if (!sameJwk(existing.dhPublicJwk, incoming.dhPublicJwk)) return error("Device keys are immutable", 403);
+    } else if (!isFullMember(requester)) {
+      // Introducing somebody new is the pairing flow, and it is exactly what a guest is told they
+      // cannot do. Without this the invite-role limit is decoration: a guest already holds the
+      // conversation key, so enrolling a device here and passing the key on out of band is the
+      // same thing as minting a link, minus the one check that refuses it.
+      return error("Only a full member can add someone", 403);
     }
 
     const member: Member = existing
       ? { ...existing, displayName: String(incoming.displayName ?? "").slice(0, 64), avatarSeed: String(incoming.avatarSeed ?? "").slice(0, 64) }
-      : { ...incoming, displayName: String(incoming.displayName ?? "").slice(0, 64), avatarSeed: String(incoming.avatarSeed ?? "").slice(0, 64) };
+      // A card arriving for the first time comes in as a full member whatever it claims: the only
+      // route that confers a lesser standing is an invite, and that one says so itself.
+      : trimMember(incoming);
     await this.ctx.storage.put(`member:${member.deviceId}`, member);
     this.broadcast({ kind: "member", member });
     return json({ ok: true });
@@ -838,13 +898,59 @@ export class ConversationRoom extends DurableObject<Env> {
   private async removeMember(requester: Member, deviceId: string): Promise<Response> {
     const target = await this.member(deviceId);
     if (!target) return json({ ok: true });
+    // Evicting somebody else is a full member's call. Leaving is nobody's to withhold — a guest
+    // who was only ever visiting has to be able to walk back out of a room they were shown.
+    if (deviceId !== requester.deviceId && !isFullMember(requester)) {
+      return error("Only a full member can remove someone else", 403);
+    }
     const members = await this.allMembers();
-    // Emptying the room would leave a meta record nobody can ever authenticate against again,
-    // and every request to it answering 401 forever.
-    if (members.length <= 1) return error("A room keeps its last member", 409);
+    // The last person out takes the room with them. Refusing instead stranded a group that was
+    // made and never shared: its owner could not leave, and the app blamed the network for it.
+    if (members.length <= 1) return this.disposeRoom();
     await this.ctx.storage.delete([`member:${deviceId}`, `push:${deviceId}`]);
+    this.dropSockets(deviceId);
     this.broadcast({ kind: "member-removed", deviceId, byDeviceId: requester.deviceId });
     return json({ ok: true });
+  }
+
+  /**
+   * Cut a device's live sockets, not only its roster row.
+   *
+   * A hibernating socket outlives the request that removed the member holding it, so an eviction
+   * that only deletes the roster entry leaves the evicted phone receiving every later broadcast —
+   * which is precisely the lost or handed-on device the eviction was for.
+   */
+  private dropSockets(deviceId: string): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        const attachment = (ws as WebSocket & { deserializeAttachment(): { deviceId?: string } }).deserializeAttachment?.();
+        if (attachment?.deviceId === deviceId) ws.close(4403, "Removed from this room");
+      } catch { /* a socket that died on its own needs no help from us */ }
+    }
+  }
+
+  /**
+   * Close the room down: history, attachments, sockets and all.
+   *
+   * Reached when the last member leaves. The R2 objects go first and by hand, because the records
+   * naming them are about to be deleted along with everything else — and in a kept room those are
+   * the only thing standing between the bucket and two gigabytes nobody will ever ask for again.
+   */
+  private async disposeRoom(): Promise<Response> {
+    const keys: string[] = [];
+    for (const prefix of ["file:", "kept:"]) {
+      for (const record of (await this.ctx.storage.list<FileRecord>({ prefix })).values()) keys.push(record.key);
+    }
+    if (keys.length) {
+      try { await this.env.ATTACHMENTS.delete(keys); }
+      catch (err) { console.error(JSON.stringify({ kind: "dispose-attachments-failed", count: keys.length, error: String(err) })); }
+    }
+    for (const ws of this.ctx.getWebSockets()) {
+      try { ws.close(4404, "This room is closed"); } catch { /* already gone */ }
+    }
+    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.deleteAlarm();
+    return json({ ok: true, closed: true });
   }
 
   private async listHistory(): Promise<Response> {
@@ -890,6 +996,10 @@ export class ConversationRoom extends DurableObject<Env> {
     const claimedDigest = request.headers.get("X-Kin-Body") ?? "";
     const signed = await this.verifySigned(request, claimedDigest);
     if (!signed) return error("Unauthorized", 401);
+    // A viewer's envelopes are refused, so an upload from one can never be referred to by any
+    // message anybody will ever see. All it can do is spend an album's storage, so refuse it here
+    // too rather than leaving the one hole in read-only that costs somebody else two gigabytes.
+    if (signed.role === "viewer") return error("You can look, but not post", 403);
     if (!request.body) return error("Missing file");
     const digest = b64urlToBytes(claimedDigest);
     if (digest.byteLength !== 32) return error("Invalid content hash");
@@ -928,14 +1038,67 @@ export class ConversationRoom extends DurableObject<Env> {
     // is the point, so those go under a prefix the sweep does not read, and are counted instead.
     if (meta.keep) {
       const bytes = (await this.ctx.storage.get<number>("keptBytes")) ?? 0;
-      await this.ctx.storage.put(`kept:${fileId}`, { fileId, key, expiresAt: 0 });
+      await this.ctx.storage.put(`kept:${fileId}`, { fileId, key, expiresAt: 0, bytes: stored, by: signed.deviceId });
+      await this.ctx.storage.put(`filekey:${fileId}`, `kept:${fileId}`);
       await this.ctx.storage.put("keptBytes", bytes + stored);
       return json({ ok: true }, 201);
     }
     const expiresAt = Date.now() + MESSAGE_TTL;
-    await this.ctx.storage.put(`file:${String(expiresAt).padStart(16, "0")}:${fileId}`, { fileId, key, expiresAt });
+    const recordKey = `file:${String(expiresAt).padStart(16, "0")}:${fileId}`;
+    await this.ctx.storage.put(recordKey, { fileId, key, expiresAt, bytes: stored, by: signed.deviceId });
+    await this.ctx.storage.put(`filekey:${fileId}`, recordKey);
     await this.scheduleSweep(expiresAt);
     return json({ ok: true }, 201);
+  }
+
+  /**
+   * Take an envelope off the relay, rather than only off the screen.
+   *
+   * A delete has always been a client-side tombstone, which is enough in an ordinary room because
+   * the ciphertext expires inside the week regardless. A kept room has no such deadline: without
+   * this, "delete for everyone" leaves the message sitting on the relay for good, and the 507 that
+   * tells somebody to delete something to make room asks for something the app cannot do.
+   */
+  private async dropMessage(requester: Member, messageId: string, meta: RoomMeta): Promise<Response> {
+    const key = await this.ctx.storage.get<string>(`msgkey:${messageId}`);
+    if (!key) return json({ ok: true });
+    const envelope = await this.ctx.storage.get<Envelope>(key);
+    // Only the sender, which is the rule every client already applies to a delete event. The relay
+    // cannot read a payload, so it has no way to tell a retraction from somebody else's censorship.
+    if (envelope && envelope.senderDeviceId !== requester.deviceId) return error("Not your message", 403);
+    await this.ctx.storage.delete([key, `msgkey:${messageId}`]);
+    if (meta.keep) {
+      const count = (await this.ctx.storage.get<number>("keptMessages")) ?? 0;
+      await this.ctx.storage.put("keptMessages", Math.max(0, count - 1));
+    }
+    this.broadcast({ kind: "message-removed", messageId });
+    return json({ ok: true });
+  }
+
+  /**
+   * Delete an attachment and give its bytes back to the room's budget.
+   *
+   * The counter has to move with the bucket or a kept room ratchets shut: `keptBytes` only ever
+   * climbed before, so an album that filled up once stayed full even after everything in it went.
+   */
+  private async dropFile(requester: Member, fileId: string, key: string, meta: RoomMeta): Promise<Response> {
+    const recordKey = await this.ctx.storage.get<string>(`filekey:${fileId}`);
+    const record = recordKey ? await this.ctx.storage.get<FileRecord>(recordKey) : undefined;
+    // Whoever put it there, or anyone who can speak for the room: a guest may take back the photo
+    // they sent, and a full member may clear out an album that has run out of space.
+    if (!isFullMember(requester) && record?.by !== requester.deviceId) return error("Not yours to delete", 403);
+    try { await this.env.ATTACHMENTS.delete(key); }
+    catch (err) {
+      // Leave the records alone so the bytes stay accounted for and the next attempt can retry.
+      console.error(JSON.stringify({ kind: "attachment-delete-failed", error: String(err) }));
+      return error("Could not delete that", 502);
+    }
+    if (recordKey) await this.ctx.storage.delete([recordKey, `filekey:${fileId}`]);
+    if (meta.keep) {
+      const bytes = (await this.ctx.storage.get<number>("keptBytes")) ?? 0;
+      await this.ctx.storage.put("keptBytes", Math.max(0, bytes - (record?.bytes ?? 0)));
+    }
+    return json({ ok: true });
   }
 
   private async getFile(key: string): Promise<Response> {
@@ -997,20 +1160,20 @@ export class ConversationRoom extends DurableObject<Env> {
     if (tail === "/channels" && request.method === "POST") {
       const signed = await this.verifySignedRequest(request);
       if (!signed) return error("Unauthorized", 401);
-      if (signed.member.role && signed.member.role !== "member") return error("Guests cannot change channels", 403);
+      if (!isFullMember(signed.member)) return error("Guests cannot change channels", 403);
       return this.putChannel(signed.body);
     }
     const channelMatch = tail.match(/^\/channels\/([A-Za-z0-9_-]+)$/);
     if (channelMatch && request.method === "DELETE") {
       const signed = await this.verifySignedRequest(request);
       if (!signed) return error("Unauthorized", 401);
-      if (signed.member.role && signed.member.role !== "member") return error("Guests cannot change channels", 403);
+      if (!isFullMember(signed.member)) return error("Guests cannot change channels", 403);
       return this.deleteChannel(channelMatch[1]);
     }
     if (tail === "/invites" && request.method === "GET") {
       const signed = await this.verifySignedRequest(request);
       if (!signed) return error("Unauthorized", 401);
-      if (signed.member.role && signed.member.role !== "member") return error("Guests cannot see invites", 403);
+      if (!isFullMember(signed.member)) return error("Guests cannot see invites", 403);
       return this.listInvites();
     }
     if (tail === "/history" && request.method === "GET") {
@@ -1019,6 +1182,12 @@ export class ConversationRoom extends DurableObject<Env> {
     }
     if (tail === "/messages" && request.method === "POST") {
       return this.postMessage(request, meta);
+    }
+    const messageMatch = tail.match(/^\/messages\/([A-Za-z0-9_-]+)$/);
+    if (messageMatch && request.method === "DELETE") {
+      const signed = await this.verifySignedRequest(request);
+      if (!signed) return error("Unauthorized", 401);
+      return this.dropMessage(signed.member, messageMatch[1], meta);
     }
     if (tail === "/push" && request.method === "POST") {
       const signed = await this.verifySignedRequest(request);
@@ -1033,6 +1202,11 @@ export class ConversationRoom extends DurableObject<Env> {
       if (request.method === "GET") {
         if (!(await this.verifySignedRequest(request))) return error("Unauthorized", 401);
         return this.getFile(key);
+      }
+      if (request.method === "DELETE") {
+        const signed = await this.verifySignedRequest(request);
+        if (!signed) return error("Unauthorized", 401);
+        return this.dropFile(signed.member, fileMatch[1], key, meta);
       }
     }
 
@@ -1060,7 +1234,7 @@ export class ConversationRoom extends DurableObject<Env> {
     const deletes: string[] = [];
 
     for (const [key, envelope] of await this.ctx.storage.list<Envelope>({ prefix: "msg:" })) {
-      if (envelope.expiresAt <= now) deletes.push(key);
+      if (envelope.expiresAt <= now) deletes.push(key, `msgkey:${envelope.id}`);
       else next = Math.min(next, envelope.expiresAt);
     }
     for (const [key, expiresAt] of await this.ctx.storage.list<number>({ prefix: "nonce:" })) {
@@ -1071,7 +1245,7 @@ export class ConversationRoom extends DurableObject<Env> {
     const expiredFiles: FileRecord[] = [];
     const fileRecordKeys: string[] = [];
     for (const [key, record] of await this.ctx.storage.list<FileRecord>({ prefix: "file:" })) {
-      if (record.expiresAt <= now) { expiredFiles.push(record); fileRecordKeys.push(key); }
+      if (record.expiresAt <= now) { expiredFiles.push(record); fileRecordKeys.push(key, `filekey:${record.fileId}`); }
       else next = Math.min(next, record.expiresAt);
     }
     if (expiredFiles.length) {

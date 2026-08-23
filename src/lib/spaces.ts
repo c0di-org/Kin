@@ -72,17 +72,22 @@ export async function removeChannel(identity: LocalIdentity, space: Conversation
 }
 
 /**
- * Read a space's directory and return the channels this device does not have yet.
+ * Read a space's directory: the channels this device does not have yet, and everything the
+ * directory currently lists.
  *
  * Joining each one is a separate step that may fail on its own — a channel deleted between the
  * listing and the join, a device that has since been removed from the space — so a channel that
  * will not open is skipped rather than failing the whole sweep.
+ *
+ * `present` is what makes a deletion travel to a device that was asleep when it happened. The
+ * relay broadcasts a removal, but a broadcast only reaches whoever is listening; the directory is
+ * the durable answer, and a channel missing from it has been deleted for everybody.
  */
 export async function discoverChannels(
   identity: LocalIdentity,
   space: Conversation,
   known: Set<string>
-): Promise<Conversation[]> {
+): Promise<{ joined: Conversation[]; present: Set<string> }> {
   const directory = await listChannels(identity, space.id);
   const found: Conversation[] = [];
   for (const record of directory) {
@@ -105,7 +110,7 @@ export async function discoverChannels(
       });
     } catch { /* not ours to open, or gone since the listing — the next sweep tries again */ }
   }
-  return found;
+  return { joined: found, present: new Set(directory.map(r => r.id)) };
 }
 
 // ---------- invite links ----------

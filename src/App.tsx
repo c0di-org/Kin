@@ -3,7 +3,7 @@ import QRCode from "qrcode";
 import { directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, wrapConversationKey } from "./lib/crypto";
 import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage, undismissDirect } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
-import { addRoomMember, claimPair, completePair, createPair, createRoom, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
+import { addRoomMember, claimPair, completePair, createPair, createRoom, dropEncryptedFile, dropEnvelope, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, InvitePreview, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
 import {
@@ -11,6 +11,7 @@ import {
   parseInviteLink, removeChannel, spaceTree
 } from "./lib/spaces";
 import { deletedIds, firstName, mergeMessages, previewOf, redact } from "./lib/ingest";
+import { rememberDeparted } from "./lib/roster";
 import { dayLabel, greeting, listStamp } from "./lib/format";
 import { useConversationSync } from "./hooks/useConversationSync";
 import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
@@ -27,8 +28,9 @@ import JoinInvite from "./components/JoinInvite";
 import NewSpace from "./components/NewSpace";
 import { Bubble, type QuotedMessage } from "./components/Bubble";
 import { Sheet } from "./components/Sheet";
+import { SafetyCheck } from "./components/SafetyCheck";
 
-type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new";
+type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
@@ -36,7 +38,7 @@ const PANEL_LABELS: Record<Panel, string> = {
   none: "", doodle: "Doodle", pair: "Add someone in person", invite: "Share a link",
   join: "Join with a code", members: "Chat details", settings: "Settings",
   attach: "Send something", add: "Start something", profile: "Your look",
-  new: "Make a new place"
+  new: "Make a new place", safety: "Safety check"
 };
 
 
@@ -51,6 +53,7 @@ export default function App() {
   const [joinCode, setJoinCode] = useState(new URLSearchParams(location.search).get("pair") ?? "");
   const [inviteLanding, setInviteLanding] = useState(() => parseInviteLink(location.hash));
   const [newIn, setNewIn] = useState<Conversation | null>(null);
+  const [safety, setSafety] = useState<{ code: string; title: string } | null>(null);
   const [openSpaces, setOpenSpaces] = useState<Record<string, boolean>>({});
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(null);
   const [toast, setToast] = useState("");
@@ -197,6 +200,16 @@ export default function App() {
         setTyping(t => active ? [...new Set([...t, senderDeviceId])] : t.filter(x => x !== senderDeviceId));
       },
       onKeyChange: warnKeyChange,
+      // A channel appeared in a space we are in — pull the directory now rather than waiting out
+      // the sweep, which is the difference between "instantly" and "within thirty seconds".
+      onChannelAdded: () => { void sweepChannels(); },
+      onChannelRemoved: (spaceId, channelId) => void (async () => {
+        const gone = (await listConversations()).find(c => c.id === channelId && c.spaceId === spaceId);
+        if (!gone) return;
+        await forgetChannel(channelId);
+        await refresh();
+        flash(`${gone.title} was removed`);
+      })(),
       onIncoming: (convId, { message }) => {
         const payload = message.payload;
         if (payload.type === "event") {
@@ -475,6 +488,11 @@ export default function App() {
    * Take a message back. Everyone folds the event in and drops the contents, so this is a real
    * retraction rather than a local hide — but only for messages we sent, since a delete naming
    * somebody else's message is refused on the way in.
+   *
+   * The tombstone is what other devices act on; the two relay calls are what stop the ciphertext
+   * outliving it. In an ordinary room they only bring forward an expiry that was coming anyway, but
+   * a kept room has no expiry at all, so without them "delete" there left the message on the relay
+   * for good — and left its bytes counted against an album that could then never be emptied.
    */
   async function deleteMessageForEveryone(m: ChatMessage): Promise<void> {
     const me = identityRef.current;
@@ -483,6 +501,13 @@ export default function App() {
     if (replyTo?.id === m.id) setReplyTo(null);
     buzz(12);
     await send(active, { type: "event", event: { kind: "delete", targetId: m.id } });
+    const att = m.payload.attachment;
+    // Best effort, and deliberately after the tombstone: the retraction is the part everyone sees,
+    // and it should not wait on — or be lost to — a relay that is briefly unreachable.
+    await Promise.allSettled([
+      dropEnvelope(me, active.id, m.id),
+      ...(att ? [dropEncryptedFile(me, active.id, att.fileId)] : [])
+    ]);
   }
 
   function jumpTo(id: string): void {
@@ -589,8 +614,12 @@ export default function App() {
     const me = identityRef.current;
     const space = conversations.find(c => c.id === channel.spaceId);
     if (!me || !space) return;
-    try { await removeChannel(me, space, channel.id); } catch { /* it goes on the next sweep */ }
-    await deleteConversation(channel.id);
+    // The directory is what makes this stick for everyone else, so a failure to take the channel
+    // out of it has to stop here. Deleting our own copy anyway would take it off one device, put
+    // it back on the next sweep, and tell the user it had gone from everybody's.
+    try { await removeChannel(me, space, channel.id); }
+    catch { return flash("Couldn’t remove that channel — are you online?"); }
+    await forgetChannel(channel.id);
     setActiveId(space.id); setPanel("none"); setConfirming(null);
     await refresh();
     flash("Channel removed for everyone");
@@ -644,17 +673,35 @@ export default function App() {
     const convs = await listConversations();
     const known = new Set(convs.map(c => c.id));
     let found = false;
+    let pruned = false;
     for (const space of convs) {
       if (space.kind !== "group" || space.spaceId) continue;
       try {
-        for (const channel of await discoverChannels(me, space, known)) {
+        const { joined, present } = await discoverChannels(me, space, known);
+        for (const channel of joined) {
           await putConversation(channel);
           known.add(channel.id);
           found = true;
         }
+        // And drop what the directory no longer lists. The removal broadcast only reaches whoever
+        // was connected at the time; this is how it reaches a device that was asleep — and without
+        // it, "delete this channel" deleted it for the one person who tapped the button.
+        for (const c of convs) {
+          if (c.spaceId !== space.id || present.has(c.id)) continue;
+          await forgetChannel(c.id);
+          pruned = true;
+        }
       } catch { /* not reachable right now — the next sweep tries again */ }
     }
-    if (found) { await refresh(); sounds.receive(); }
+    if (found || pruned) await refresh();
+    if (found) sounds.receive();
+  }
+
+  /** A channel that has gone from its space's directory, off this device too. */
+  async function forgetChannel(channelId: string): Promise<void> {
+    await deleteConversation(channelId);
+    setMessages(x => { const { [channelId]: _gone, ...rest } = x; return rest; });
+    if (activeIdRef.current === channelId) { setActiveId(null); setPanel("none"); }
   }
 
   // ---------- family lifecycle ----------
@@ -684,9 +731,14 @@ export default function App() {
           let members = [pkg.creator, publicMember(id)];
           try { members = await roomMembers(id, pkg.group.id); } catch { /* keep pair members */ }
           const c: Conversation = { id: pkg.group.id, kind: "group", title: pkg.group.title, key, members, createdAt: Date.now() };
-          await putConversation(c); await refresh(); setActiveId(c.id); setPanel("none");
+          await putConversation(c); await refresh(); setActiveId(c.id);
           window.history.replaceState({}, "", "/");
-          confetti(); sounds.tada(); flash(`You’re in! Safety check: ${pkg.safetyCode}`);
+          confetti(); sounds.tada();
+          // Worked out here, from the card that actually arrived, rather than read off the package.
+          // `pkg.safetyCode` is a string the relay carried: displaying it made the check agree with
+          // whoever wrote it, so it agreed even when that was somebody sitting in the middle.
+          setSafety({ code: await safetyCode(pkg.creator, publicMember(id)), title: `You’re in — welcome to ${pkg.group.title}` });
+          setPanel("safety");
           return;
         } catch { await new Promise(r => setTimeout(r, 1000)); }
       }
@@ -694,22 +746,30 @@ export default function App() {
     } catch { flash("Hmm, that code didn’t work"); }
   }
 
-  async function startPairing(): Promise<void> {
-    if (!identity || !active || active.kind !== "group") return;
+  /**
+   * `conv` is passed rather than read off `active`, because the family card sets the active
+   * conversation and starts pairing in the same tick — and `active` is a render-time value, so it
+   * was still null when this ran. On a wide screen the first chat is already selected and nobody
+   * noticed; on a phone, tapping 💌 on a card did nothing at all until you tapped it twice.
+   */
+  async function startPairing(conv: Conversation | null = active): Promise<void> {
+    if (!identity || !conv || conv.kind !== "group") return;
     setPanel("pair"); setPair(null);
     try {
-      const p = await createPair(publicMember(identity), { id: active.id, title: active.title });
+      const p = await createPair(publicMember(identity), { id: conv.id, title: conv.title });
       const link = `${location.origin}${location.pathname}?pair=${encodeURIComponent(p.code)}`;
       setPair({ code: p.code, token: p.creatorToken, link, qr: await QRCode.toDataURL(link, { margin: 1, width: 260 }) });
       for (let i = 0; i < 150; i++) {
         try {
           const status = await pairStatus(p.code, p.creatorToken);
           if (status.joiner) {
-            const wrap = await wrapConversationKey(identity, status.joiner, active.key);
-            await addRoomMember(identity, active.id, status.joiner);
+            const wrap = await wrapConversationKey(identity, status.joiner, conv.key);
+            await addRoomMember(identity, conv.id, status.joiner);
+            // Worked out here for this phone to show, and deliberately not sent: the joiner derives
+            // their own from the card they receive, which is what makes the two agreeing mean anything.
             const code = await safetyCode(publicMember(identity), status.joiner);
-            await completePair(p.code, { creator: publicMember(identity), group: { id: active.id, title: active.title, ...wrap }, safetyCode: code }, p.creatorToken);
-            const current = (await listConversations()).find(c => c.id === active.id) ?? active;
+            await completePair(p.code, { creator: publicMember(identity), group: { id: conv.id, title: conv.title, ...wrap } }, p.creatorToken);
+            const current = (await listConversations()).find(c => c.id === conv.id) ?? conv;
             await putConversation({ ...current, members: [...current.members.filter(m => m.deviceId !== status.joiner!.deviceId), status.joiner] });
             await refresh();
             setPair(x => x ? { ...x, safety: code } : x);
@@ -758,7 +818,9 @@ export default function App() {
       await putConversation({
         ...current,
         members: current.members.filter(m => m.deviceId !== member.deviceId),
-        keyAlerts: current.keyAlerts?.filter(id => id !== member.deviceId)
+        keyAlerts: current.keyAlerts?.filter(id => id !== member.deviceId),
+        // Off the roster, but not forgotten: what they sent before today still has to verify.
+        ...rememberDeparted(current, current.members.filter(m => m.deviceId === member.deviceId))
       });
       await refresh();
       setConfirming(null);
@@ -879,6 +941,11 @@ export default function App() {
   }, [visible, deleted, nameFor]);
 
   const typingNames = typing.map(d => active?.members.find(m => m.deviceId === d)?.displayName).filter(Boolean).map(n => firstName(n!));
+  // "Only for 7 days" stopped being true the moment a room could be kept, and settings is where
+  // somebody goes to check what the relay is holding — so name the exceptions rather than
+  // flatly contradicting the sheet that says an album keeps things forever.
+  const kept = conversations.filter(c => c.keep);
+  const keptTitles = kept.map(c => c.title).join(", ");
   const showIosInstall = isAppleTouchDevice() && !isStandalone();
 
   /** One row of the sidebar, whether it is a space, a channel under one, or a direct chat. */
@@ -919,7 +986,7 @@ export default function App() {
       <div className={`conversation-list ${showCards ? "as-cards" : ""}`}>
         {showCards && sorted.map(c => <FamilyCard key={c.id} c={c} self={identity.deviceId} active={c.id === activeId}
           recent={recent[c.id] ?? []} onOpen={() => setActiveId(c.id)}
-          onInvite={() => { setActiveId(c.id); void startPairing(); }}/>)}
+          onInvite={() => { setActiveId(c.id); void startPairing(c); }}/>)}
         {!showCards && <>
           {tree.spaces.map(node => {
             const expanded = openSpaces[node.space.id] ?? node.channels.some(c => c.id === activeId);
@@ -1077,7 +1144,7 @@ export default function App() {
         <h2>Add a family member</h2>
         {!pair && <div className="hello-card">⏳<p>Getting your code…</p></div>}
         {pair && (pair.safety
-          ? <div className="paired"><b>🎉</b><strong>They’re in!</strong><div>{pair.safety}</div><small>See these same emoji on both phones? You’re safely connected.</small></div>
+          ? <SafetyCheck code={pair.safety} title="They’re in!"/>
           : <><img className="qr" src={pair.qr} alt="Invite QR code"/><div className="code">{pair.code}</div><small>Scan the QR on their phone, or type the code into Kin</small>
               <div className="pair-actions">
                 <button className="chip-btn" onClick={() => { void navigator.clipboard.writeText(pair.link ?? pair.code); flash("Copied!"); }}>Copy link</button>
@@ -1107,7 +1174,7 @@ export default function App() {
                 <small>{alerted ? "Security keys changed — check with them in person" : me ? "This device" : "Tap for a private chat"}</small>
               </span>
             </button>
-            {!me && <button className="member-remove" aria-label={`Remove ${m.displayName}`}
+            {!me && isFullMember(active) && <button className="member-remove" aria-label={`Remove ${m.displayName}`}
               onClick={() => setConfirming(x => x === `member:${m.deviceId}` ? null : `member:${m.deviceId}`)}>✕</button>}
             {confirming === `member:${m.deviceId}` && <div className="confirm">
               <p><b>Remove {firstName(m.displayName)}?</b> They stop getting new messages here. The ones already on their phone stay there — Kin can’t reach into a device it has lost touch with.</p>
@@ -1168,6 +1235,10 @@ export default function App() {
           </div>}
         </div>
       </>)}
+      {panel === "safety" && safety && <>
+        <SafetyCheck code={safety.code} title={safety.title}/>
+        <button className="primary" onClick={() => { setSafety(null); setPanel("none"); }}>They match 👍</button>
+      </>}
       {panel === "profile" && <ProfileEditor identity={identity} onCancel={() => setPanel("settings")} onSave={(n, a) => void saveProfile(n, a)}/>}
       {panel === "settings" && <>
         <button className="profile" onClick={() => setPanel("profile")}>
@@ -1180,7 +1251,11 @@ export default function App() {
         {showIosInstall && <div className="hint"><strong>📲 Install Kin</strong><small>Tap Share, then Add to Home Screen. Open the icon to get notifications.</small></div>}
         <button className="setting" onClick={() => void enableNotifications()}><span>🔔</span>Notifications<b>{pushStatusLabel(pushStatus)}</b></button>
         <button className="setting" onClick={() => setPanel("join")}><span>🔗</span>Join with a code</button>
-        <small className="privacy">🔒 End-to-end encrypted · the relay only holds scrambled messages, and only for 7 days · photos & doodles live safely on your devices</small>
+        <small className="privacy">
+          🔒 End-to-end encrypted · the relay only holds scrambled messages, and only for 7 days
+          {kept.length > 0 && ` — except ${keptTitles}, which ${kept.length === 1 ? "keeps" : "keep"} everything until you delete it`}
+          {" "}· photos &amp; doodles live safely on your devices
+        </small>
       </>}
     </Sheet>}
     {/* Toasts are the only channel for a failed send or a key-change warning, and a screen

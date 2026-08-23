@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import type { ChatMessage, CipherEnvelope, Conversation, LocalIdentity, PublicMember } from "../lib/types";
 import { getMessage, knownMessageIds, listConversations, markOwnMessagesRead, putConversation, putMessage, putMessages } from "../lib/db";
 import { history as roomHistory, roomMembers, websocketUrl } from "../lib/relay";
-import { applyRoster } from "../lib/roster";
+import { applyRoster, rememberDeparted } from "../lib/roster";
 import { mergeMessages, openEnvelope, openEnvelopes, reconnectDelay, summarize, type OpenedMessage } from "../lib/ingest";
 
 /**
@@ -22,6 +22,15 @@ export type SyncEvents = {
   onTyping(conversationId: string, senderDeviceId: string, active: boolean): void;
   /** Someone's device keys changed under us and we refused the change. */
   onKeyChange(member: PublicMember): void;
+  /**
+   * A channel appeared in or vanished from a space we are in.
+   *
+   * The relay broadcasts both, and until now nothing listened to either: a new channel waited on
+   * the thirty-second sweep to be noticed, and a deleted one was never noticed at all — so
+   * "removed for everyone" removed it for exactly one person.
+   */
+  onChannelAdded(spaceId: string): void;
+  onChannelRemoved(spaceId: string, channelId: string): void;
 };
 
 export type ConversationSync = {
@@ -108,12 +117,16 @@ export function useConversationSync({ identity, conversations, activeId, online,
   async function handleFrame(conversationId: string, raw: string): Promise<void> {
     const me = identityRef.current;
     if (!me) return;
-    let frame: { kind?: string; member?: PublicMember; senderDeviceId?: string; active?: boolean; messageId?: string; deviceId?: string };
+    let frame: { kind?: string; member?: PublicMember; senderDeviceId?: string; active?: boolean; messageId?: string; deviceId?: string; channelId?: string };
     try { frame = JSON.parse(raw); } catch { return; }
 
     if (frame.kind === "message") return void await ingestOne(conversationId, frame as unknown as CipherEnvelope);
     if (frame.kind === "member" && frame.member) return void await applyMember(me, conversationId, frame.member);
     if (frame.kind === "member-removed" && frame.deviceId) return void await applyRemoval(me, conversationId, frame.deviceId);
+    if (frame.kind === "channel") return void eventsRef.current.onChannelAdded(conversationId);
+    if (frame.kind === "channel-removed" && frame.channelId) {
+      return void eventsRef.current.onChannelRemoved(conversationId, frame.channelId);
+    }
     if (frame.kind === "typing" && frame.senderDeviceId && frame.senderDeviceId !== me.deviceId) {
       eventsRef.current.onTyping(conversationId, frame.senderDeviceId, !!frame.active);
     }
@@ -146,10 +159,14 @@ export function useConversationSync({ identity, conversations, activeId, online,
     if (deviceId === me.deviceId) return;
     const conv = (await listConversations()).find(c => c.id === conversationId);
     if (!conv || conv.kind !== "group") return;
+    const gone = conv.members.filter(m => m.deviceId === deviceId);
     await putConversation({
       ...conv,
       members: conv.members.filter(m => m.deviceId !== deviceId),
-      keyAlerts: conv.keyAlerts?.filter(id => id !== deviceId)
+      keyAlerts: conv.keyAlerts?.filter(id => id !== deviceId),
+      // Their card stays, unlisted. Nobody signs this frame, so acting on it by forgetting a key
+      // would let the relay make everything that person ever said fail verification and disappear.
+      ...rememberDeparted(conv, gone)
     });
     eventsRef.current.onConversationsChanged();
   }
@@ -213,6 +230,17 @@ export function useConversationSync({ identity, conversations, activeId, online,
   useEffect(() => {
     if (!identity) return;
     wanted.current = new Set(conversations.map(c => c.id));
+    // A conversation that has left the list — left, deleted, a channel someone removed — had its
+    // socket abandoned rather than closed, so it stayed open and kept delivering a room this
+    // device is no longer in.
+    for (const [id, socket] of sockets.current) {
+      if (wanted.current.has(id)) continue;
+      sockets.current.delete(id);
+      retries.current.delete(id);
+      clearTimeout(retryTimers.current.get(id));
+      retryTimers.current.delete(id);
+      socket.close();
+    }
     for (const id of wanted.current) if (!sockets.current.has(id)) void connect(id);
   }, [identity?.deviceId, conversationIds, online]);
 

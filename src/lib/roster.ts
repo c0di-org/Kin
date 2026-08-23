@@ -48,11 +48,35 @@ export function applyRoster(
   const { members, refused } = mergeMembers(conv.members, incoming);
   const alerts = new Set([...(conv.keyAlerts ?? []), ...refused.map(m => m.deviceId)]);
   const listed = new Set(incoming.map(m => m.deviceId));
-  const kept = authoritative && conv.kind === "group"
-    ? members.filter(m => listed.has(m.deviceId) || alerts.has(m.deviceId))
-    : members;
+  const stays = (m: PublicMember): boolean => listed.has(m.deviceId) || alerts.has(m.deviceId);
+  const kept = authoritative && conv.kind === "group" ? members.filter(stays) : members;
+  const left = authoritative && conv.kind === "group" ? members.filter(m => !stays(m)) : [];
   return {
-    conversation: { ...conv, members: kept, ...(alerts.size ? { keyAlerts: [...alerts] } : {}) },
+    conversation: {
+      ...conv,
+      members: kept,
+      ...(alerts.size ? { keyAlerts: [...alerts] } : {}),
+      ...rememberDeparted(conv, left)
+    },
     refused
   };
+}
+
+/**
+ * Set somebody's card aside when they come off the roster, rather than letting go of it.
+ *
+ * The roster arrives from the relay and nobody signs it, so dropping a card on its say-so hands
+ * the relay a way to make a person's whole history unverifiable — and therefore invisible —
+ * without ever touching a message. Keeping the key costs one row and closes that off entirely.
+ */
+export function rememberDeparted(conv: Conversation, left: PublicMember[]): { pastMembers?: PublicMember[] } {
+  if (!left.length) return conv.pastMembers ? { pastMembers: conv.pastMembers } : {};
+  const byId = new Map((conv.pastMembers ?? []).map(m => [m.deviceId, m]));
+  for (const m of left) if (!byId.has(m.deviceId)) byId.set(m.deviceId, m);
+  return { pastMembers: [...byId.values()] };
+}
+
+/** Everyone whose signature we will still check: the room as it is, plus the room as it was. */
+export function knownSenders(conv: Conversation): PublicMember[] {
+  return [...conv.members, ...(conv.pastMembers ?? [])];
 }

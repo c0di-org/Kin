@@ -123,6 +123,22 @@ export async function listInvites(identity: LocalIdentity, roomId: string): Prom
   return signedJson(identity, "GET", `/api/rooms/${encodeURIComponent(roomId)}/invites`);
 }
 
+/**
+ * Take a message off the relay as well as off the screen.
+ *
+ * A delete has always been a tombstone every client folds in, which is enough in an ordinary room
+ * because the ciphertext lapses within the week anyway. A kept room has no such deadline, so
+ * without this a retraction there left the message on the relay permanently.
+ */
+export async function dropEnvelope(identity: LocalIdentity, roomId: string, messageId: string): Promise<void> {
+  await signedJson(identity, "DELETE", `/api/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}`);
+}
+
+/** And its attachment, which is what actually gives a full album its space back. */
+export async function dropEncryptedFile(identity: LocalIdentity, roomId: string, fileId: string): Promise<void> {
+  await signedJson(identity, "DELETE", `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}`);
+}
+
 export async function sendEnvelope(roomId: string, envelope: CipherEnvelope): Promise<void> {
   await json(`/api/rooms/${encodeURIComponent(roomId)}/messages`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(envelope)

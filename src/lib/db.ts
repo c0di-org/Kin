@@ -206,10 +206,3 @@ export async function putBlob(record: StoredBlob): Promise<void> {
 export async function getBlob(fileId: string): Promise<StoredBlob | null> {
   return (await read<StoredBlob>("blobs", s => s.get(fileId))) ?? null;
 }
-export async function clearAll(): Promise<void> {
-  // An open connection blocks deleteDatabase, so let go of ours first.
-  const conn = connection;
-  connection = null;
-  if (conn) await conn.then(c => c.close()).catch(() => { /* never opened */ });
-  indexedDB.deleteDatabase(DB_NAME);
-}

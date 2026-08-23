@@ -162,7 +162,11 @@ describe("safety code", () => {
   it("is four emoji", async () => {
     const a = publicMember(await identity("Alice"));
     const b = publicMember(await identity("Bob"));
-    expect((await safetyCode(a, b)).split(" ")).toHaveLength(4);
+    // Two fingerprints of eight, one per device: forty bits each, and each one a preimage
+    // problem on its own rather than a collision search across a pair the attacker picks.
+    const lines = (await safetyCode(a, b)).split("\n");
+    expect(lines).toHaveLength(2);
+    for (const line of lines) expect(line.split(" ")).toHaveLength(8);
   });
 });
 
