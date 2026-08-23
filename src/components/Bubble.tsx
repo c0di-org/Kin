@@ -23,10 +23,12 @@ function MediaBody({ att, identity, c, onOpenMedia }: { att: AttachmentPayload; 
 /** What a message is quoting, resolved by the caller since only it holds the whole thread. */
 export type QuotedMessage = { id: string; name: string; preview: string; gone: boolean };
 
-export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump }: {
+export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, entrance, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump }: {
   m: ChatMessage; prev?: ChatMessage; me: string; identity: LocalIdentity; c: Conversation;
   reactions?: Record<string, string[]>; reacting: boolean; last: boolean; deleted: boolean;
   quoted?: QuotedMessage;
+  /** This message turned up while the thread was on screen, so it is worth animating in. */
+  entrance?: boolean;
   onReactBar(): void; onReact(emoji: string, at?: { x: number; y: number }): void;
   onOpenMedia(att: AttachmentPayload, url: string): void; onRetry(): void;
   onReply(): void; onCopy(): void; onDelete(): void; onJump(id: string): void;
@@ -70,7 +72,7 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
           {mine && <button className="act-danger" onClick={onDelete}>🗑 Delete</button>}
         </div>
       </div>}
-      <div ref={bubble} className={`bubble ${deleted ? "deleted" : ""} ${big ? "big-emoji" : ""} ${!deleted && m.payload.type === "file" ? "media-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""} ${reacting ? "reacting" : ""}`}
+      <div ref={bubble} className={`bubble ${entrance ? "entering" : ""} ${deleted ? "deleted" : ""} ${big ? "big-emoji" : ""} ${!deleted && m.payload.type === "file" ? "media-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""} ${reacting ? "reacting" : ""}`}
         onPointerDown={startPress} onPointerUp={endPress} onPointerLeave={endPress} onPointerCancel={endPress}
         onContextMenu={e => { e.preventDefault(); onReactBar(); }}
         onClick={() => { if (m.status === "failed") onRetry(); }}>

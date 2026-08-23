@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, wrapConversationKey } from "./lib/crypto";
 import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage, undismissDirect } from "./lib/db";
@@ -33,6 +33,9 @@ import { SafetyCheck } from "./components/SafetyCheck";
 type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
+// One shared empty array, so a thread we have not read yet keeps the same identity across renders
+// and the memo below it does not recompute for nothing.
+const NO_MESSAGES: ChatMessage[] = [];
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
 const PANEL_LABELS: Record<Panel, string> = {
   none: "", doodle: "Doodle", pair: "Add someone in person", invite: "Share a link",
@@ -73,6 +76,15 @@ export default function App() {
   // the first one over focus and inert, for a question that fits on one line.
   const [confirming, setConfirming] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Messages that turned up while we were looking at this thread — the only ones that should play
+   * the entry animation.
+   *
+   * Opening a chat mounts the whole backlog at once, and an animation meant for one arriving
+   * message then fires on every bubble on screen simultaneously. Kept per open thread and cleared
+   * on the way in, so it never grows past a sitting.
+   */
+  const [entering, setEntering] = useState<Set<string>>(new Set());
 
   const identityRef = useRef<LocalIdentity | null>(identity);
   const activeIdRef = useRef<string | null>(activeId);
@@ -98,9 +110,13 @@ export default function App() {
   useEffect(() => { pushStatusRef.current = pushStatus; }, [pushStatus]);
 
   const active = conversations.find(c => c.id === activeId) ?? null;
-  const activeMessages = messages[activeId ?? ""] ?? [];
+  const activeMessages = messages[activeId ?? ""] ?? NO_MESSAGES;
+  // Absent means "not read off disk yet"; an empty array means "read, and there is nothing in it".
+  // Collapsing the two is what made a full thread claim to be empty for a moment on the way in.
+  const threadLoaded = !!activeId && messages[activeId] !== undefined;
 
   const flash = (s: string) => { setToast(s); setTimeout(() => setToast(""), 2400); };
+  const noteEntering = (id: string) => setEntering(s => new Set(s).add(id));
   async function refresh() { setConversations(await listConversations()); }
   async function refreshPush() { setPushStatus(await currentPushStatus()); }
 
@@ -212,6 +228,7 @@ export default function App() {
       })(),
       onIncoming: (convId, { message }) => {
         const payload = message.payload;
+        if (payload.type !== "event" && convId === activeIdRef.current) noteEntering(message.id);
         if (payload.type === "event") {
           if (payload.event?.kind === "reaction" && payload.event.value) { emojiBurst(payload.event.value); sounds.react(); }
           return;
@@ -319,18 +336,20 @@ export default function App() {
   useEffect(() => {
     if (!identity || !activeId) return;
     void (async () => {
-      setMessages(x => ({ ...x, [activeId]: x[activeId] ?? [] }));
       const cached = await listMessages(activeId);
-      setMessages(x => ({ ...x, [activeId]: cached }));
+      setMessages(x => ({ ...x, [activeId]: mergeMessages(cached, x[activeId] ?? []) }));
       await markRead(activeId);
     })();
-    setTyping([]); setReactFor(null); setReplyTo(null); setConfirming(null);
+    setTyping([]); setReactFor(null); setReplyTo(null); setConfirming(null); setEntering(new Set());
     const onVisible = () => { if (!document.hidden && activeIdRef.current === activeId) void markRead(activeId); };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [identity?.deviceId, activeId]);
 
-  useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }); }, [activeMessages.length, typing.length, activeId]);
+  // Layout, not passive: a plain effect runs after the browser has painted, so the thread was
+  // painted at the top and then yanked to the bottom a few frames later. This lands the scroll in
+  // the same frame the bubbles appear in.
+  useLayoutEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }); }, [activeMessages.length, typing.length, activeId]);
 
   // The composer floats over the message list rather than pushing it up, so the list reserves room
   // for it in padding — which only works if we tell CSS how tall the composer actually is right now
@@ -374,6 +393,7 @@ export default function App() {
     const env = await signEnvelope(me, await encryptPayload(conv.id, conv.key, me.deviceId, payload));
     const optimistic: ChatMessage = { id: env.id, conversationId: conv.id, senderDeviceId: me.deviceId, createdAt: env.createdAt, payload, status: "sending" };
     await putMessage(optimistic);
+    if (payload.type !== "event" && conv.id === activeIdRef.current) noteEntering(env.id);
     setMessages(x => ({ ...x, [conv.id]: [...(x[conv.id] ?? []), optimistic] }));
     if (payload.type !== "event") {
       await putConversation({
@@ -1040,7 +1060,7 @@ export default function App() {
             <p>Send a link to whoever belongs here. It keeps working whether or not you’re online when they open it.</p>
             <button className="primary" onClick={() => setPanel("invite")}>Share a link 🔗</button>
           </div>}
-          {visible.length === 0 && active.members.length > 1 && <div className="hello-card">👋<p>Say hi!</p></div>}
+          {threadLoaded && visible.length === 0 && active.members.length > 1 && <div className="hello-card">👋<p>Say hi!</p></div>}
           {visible.map((m, i) => {
             const prev = visible[i - 1];
             const newDay = !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
@@ -1050,6 +1070,7 @@ export default function App() {
                 reactions={reactions.get(m.id)}
                 reacting={reactFor === m.id}
                 last={i === visible.length - 1}
+                entrance={entering.has(m.id)}
                 deleted={deleted.has(m.id)}
                 quoted={quotedFor(m)}
                 onReactBar={() => setReactFor(x => x === m.id ? null : m.id)}
