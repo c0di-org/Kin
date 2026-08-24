@@ -6,7 +6,7 @@ import {
   createInvite, createRoom, joinChannel, listChannels, previewInvite,
   publishChannel, redeemInvite, unpublishChannel
 } from "./relay";
-import type { Conversation, InvitePreview, InviteRole, LocalIdentity, PublicMember } from "./types";
+import type { ChannelMeta, Conversation, InvitePreview, InviteRole, LocalIdentity, PublicMember } from "./types";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -19,7 +19,7 @@ export const DEFAULT_INVITE_TTL = 7 * DAY;
  * A group with nothing above it. Every group used to be one of these without needing a name for
  * it; a group only becomes a *space* in any meaningful sense once it has a second channel.
  */
-export async function createSpace(identity: LocalIdentity, title: string, options: { emoji?: string; keep?: boolean } = {}): Promise<Conversation> {
+export async function createSpace(identity: LocalIdentity, title: string, options: { emoji?: string; keep?: boolean; color?: string } = {}): Promise<Conversation> {
   const space: Conversation = {
     id: randomId(),
     kind: "group",
@@ -28,6 +28,7 @@ export async function createSpace(identity: LocalIdentity, title: string, option
     members: [publicMember(identity)],
     createdAt: Date.now(),
     ...(options.emoji ? { emoji: options.emoji } : {}),
+    ...(options.color ? { color: options.color } : {}),
     ...(options.keep ? { keep: true } : {})
   };
   await createRoom(identity, space.id, "group", space.title, space.members, { keep: options.keep });
@@ -46,11 +47,12 @@ export async function createChannel(
   identity: LocalIdentity,
   space: Conversation,
   title: string,
-  options: { emoji?: string; keep?: boolean } = {}
+  options: { emoji?: string; keep?: boolean; color?: string } = {}
 ): Promise<Conversation> {
   const id = randomId();
   const name = title.trim().slice(0, 40) || "New channel";
   const emoji = options.emoji ?? "💬";
+  const at = Date.now();
   const channel: Conversation = {
     id,
     kind: "group",
@@ -58,13 +60,33 @@ export async function createChannel(
     emoji,
     key: await deriveChannelKey(space.key, id),
     members: [publicMember(identity)],
-    createdAt: Date.now(),
+    createdAt: at,
+    metaAt: at,
     spaceId: space.id,
+    ...(options.color ? { color: options.color } : {}),
     ...(options.keep ? { keep: true } : {})
   };
   await createRoom(identity, id, "group", name, channel.members, { spaceId: space.id, keep: options.keep });
-  await publishChannel(identity, space.id, { id, ...(await sealChannelMeta(space.key, { title: name, emoji })) });
+  await republishChannel(identity, space, channel);
   return channel;
+}
+
+/**
+ * Write a channel's new name, face and colour back into its space's directory.
+ *
+ * The rename itself travels as an event in the room, which is what everybody already inside folds
+ * in. This is for everybody who is not: the directory is the only copy a device joining next
+ * month will ever see, and a channel that is called one thing to the family and another to the
+ * newcomer is worse than one that was never renamed.
+ */
+export async function republishChannel(identity: LocalIdentity, space: Conversation, channel: Conversation): Promise<void> {
+  const meta: ChannelMeta = {
+    title: channel.title,
+    emoji: channel.emoji ?? "💬",
+    at: channel.metaAt ?? Date.now(),
+    ...(channel.color ? { color: channel.color } : {})
+  };
+  await publishChannel(identity, space.id, { id: channel.id, ...(await sealChannelMeta(space.key, meta)) });
 }
 
 export async function removeChannel(identity: LocalIdentity, space: Conversation, channelId: string): Promise<void> {
@@ -72,8 +94,8 @@ export async function removeChannel(identity: LocalIdentity, space: Conversation
 }
 
 /**
- * Read a space's directory: the channels this device does not have yet, and everything the
- * directory currently lists.
+ * Read a space's directory: the channels this device does not have yet, what the directory has
+ * since been told to call the ones it does, and everything it currently lists.
  *
  * Joining each one is a separate step that may fail on its own — a channel deleted between the
  * listing and the join, a device that has since been removed from the space — so a channel that
@@ -82,35 +104,49 @@ export async function removeChannel(identity: LocalIdentity, space: Conversation
  * `present` is what makes a deletion travel to a device that was asleep when it happened. The
  * relay broadcasts a removal, but a broadcast only reaches whoever is listening; the directory is
  * the durable answer, and a channel missing from it has been deleted for everybody.
+ *
+ * `renamed` is the same idea for a name. A rename also travels as an event in the channel itself,
+ * which is the copy anybody reading the room folds in — this is the copy that reaches a device
+ * whose seven days of history no longer contain the rename. It carries the stamp the editor wrote,
+ * so a directory that has fallen behind a fresher fold is ignored rather than allowed to undo it.
  */
 export async function discoverChannels(
   identity: LocalIdentity,
   space: Conversation,
-  known: Set<string>
-): Promise<{ joined: Conversation[]; present: Set<string> }> {
+  known: Map<string, Conversation>
+): Promise<{ joined: Conversation[]; renamed: { id: string; meta: ChannelMeta }[]; present: Set<string> }> {
   const directory = await listChannels(identity, space.id);
   const found: Conversation[] = [];
+  const renamed: { id: string; meta: ChannelMeta }[] = [];
   for (const record of directory) {
-    if (known.has(record.id)) continue;
     try {
       const meta = await openChannelMeta(space.key, record.blob, record.iv);
-      const mine = publicMember(identity);
-      await joinChannel(identity, record.id, { ...mine, ...(space.profile ?? {}) });
+      const mine = known.get(record.id);
+      if (mine) {
+        const fresher = (meta.at ?? 0) > (mine.metaAt ?? 0);
+        const differs = meta.title !== mine.title || meta.emoji !== mine.emoji || (meta.color ?? undefined) !== mine.color;
+        if (fresher && differs) renamed.push({ id: record.id, meta });
+        continue;
+      }
+      const card = publicMember(identity);
+      await joinChannel(identity, record.id, { ...card, ...(space.profile ?? {}) });
       found.push({
         id: record.id,
         kind: "group",
         title: meta.title,
         emoji: meta.emoji,
         key: await deriveChannelKey(space.key, record.id),
-        members: [mine],
+        members: [card],
         createdAt: record.createdAt,
         spaceId: space.id,
+        ...(meta.at ? { metaAt: meta.at } : {}),
+        ...(meta.color ? { color: meta.color } : {}),
         ...(space.profile ? { profile: space.profile } : {}),
         ...(space.role ? { role: space.role } : {})
       });
     } catch { /* not ours to open, or gone since the listing — the next sweep tries again */ }
   }
-  return { joined: found, present: new Set(directory.map(r => r.id)) };
+  return { joined: found, renamed, present: new Set(directory.map(r => r.id)) };
 }
 
 // ---------- invite links ----------
@@ -281,10 +317,16 @@ export function spaceTree(conversations: Conversation[]): {
 
 /** Can this device do the things only a full member may — invite, add channels, rename? */
 export function isFullMember(c: Conversation | null): boolean {
-  return !!c && (c.role ?? "member") === "member";
+  return !!c && !c.removedAt && (c.role ?? "member") === "member";
 }
 
-/** A viewer came to look. The relay refuses their envelopes; the composer should not offer. */
+/**
+ * A viewer came to look. The relay refuses their envelopes; the composer should not offer.
+ *
+ * Somebody who has been taken off the roster is in the same position for a different reason: the
+ * relay will refuse them too, and a composer that accepts a message it knows will fail is a
+ * composer that lies. What they already hold stays theirs, and being put back clears it.
+ */
 export function canPost(c: Conversation | null): boolean {
-  return !!c && (c.role ?? "member") !== "viewer";
+  return !!c && !c.removedAt && (c.role ?? "member") !== "viewer";
 }

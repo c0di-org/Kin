@@ -3,7 +3,7 @@ import type { ChatMessage, CipherEnvelope, Conversation, LocalIdentity, PublicMe
 import { getMessage, knownMessageIds, listConversations, markOwnMessagesRead, putConversation, putMessage, putMessages } from "../lib/db";
 import { history as roomHistory, roomMembers, websocketUrl } from "../lib/relay";
 import { applyRoster, rememberDeparted } from "../lib/roster";
-import { mergeMessages, openEnvelope, openEnvelopes, reconnectDelay, summarize, type OpenedMessage } from "../lib/ingest";
+import { foldMeta, mergeMessages, openEnvelope, openEnvelopes, reconnectDelay, summarize, type OpenedMessage } from "../lib/ingest";
 
 /**
  * Everything the transport hands back to the UI.
@@ -20,6 +20,8 @@ export type SyncEvents = {
   /** A live message arrived from someone else. The moment to react, not just render. */
   onIncoming(conversationId: string, opened: OpenedMessage): void;
   onTyping(conversationId: string, senderDeviceId: string, active: boolean): void;
+  /** We are no longer on this room's roster — the first time we hear it, not every time. */
+  onRemoved(conversationId: string): void;
   /** Someone's device keys changed under us and we refused the change. */
   onKeyChange(member: PublicMember): void;
   /**
@@ -109,7 +111,13 @@ export function useConversationSync({ identity, conversations, activeId, online,
       const roster = await roomMembers(me, conversationId);
       const { conversation, refused } = applyRoster(conv, roster, { authoritative: true });
       refused.forEach(m => eventsRef.current.onKeyChange(m));
-      await putConversation(conversation);
+      // The roster we just pulled is the one the relay would enforce, so it is also the honest
+      // answer to "are we still in this room" — and the way back out of the read-only state,
+      // which is why it is cleared here rather than only ever set.
+      const listed = roster.some(m => m.deviceId === me.deviceId);
+      const { removedAt: _was, ...rest } = conversation;
+      await putConversation(listed ? rest : { ...conversation, removedAt: conversation.removedAt ?? Date.now() });
+      if (!listed && !conv.removedAt) eventsRef.current.onRemoved(conversationId);
       eventsRef.current.onConversationsChanged();
     } catch { /* offline */ }
   }
@@ -150,13 +158,24 @@ export function useConversationSync({ identity, conversations, activeId, online,
   /**
    * Somebody was removed from the room — an old phone, or the person leaving themselves.
    *
-   * Being removed ourselves is not handled here on purpose. The relay stops answering for us the
-   * moment it happens, so the socket closes and reconnects fail; deleting our own copy of the
-   * conversation off the back of a frame would mean any relay that felt like it could erase a
-   * family's history from a device. What we hold locally stays ours.
+   * Being removed *ourselves* is noted, never acted on. Deleting our own copy of a conversation
+   * off the back of an unsigned frame would mean any relay that felt like it could erase a
+   * family's history from a device, so what we hold locally stays ours: the room goes read-only
+   * and says why, which is the one thing the old silence got wrong — messages simply failed to
+   * send, forever, with the app blaming the network.
    */
   async function applyRemoval(me: LocalIdentity, conversationId: string, deviceId: string): Promise<void> {
-    if (deviceId === me.deviceId) return;
+    if (deviceId === me.deviceId) {
+      // Nothing is deleted and nothing is forgotten — see above. All this does is stop the
+      // composer promising delivery the relay has already said it will refuse, and it is undone
+      // by the next roster pull that lists us again.
+      const mine = (await listConversations()).find(c => c.id === conversationId);
+      if (!mine || mine.removedAt) return;
+      await putConversation({ ...mine, removedAt: Date.now() });
+      eventsRef.current.onRemoved(conversationId);
+      eventsRef.current.onConversationsChanged();
+      return;
+    }
     const conv = (await listConversations()).find(c => c.id === conversationId);
     if (!conv || conv.kind !== "group") return;
     const gone = conv.members.filter(m => m.deviceId === deviceId);
@@ -169,6 +188,34 @@ export function useConversationSync({ identity, conversations, activeId, online,
       ...rememberDeparted(conv, gone)
     });
     eventsRef.current.onConversationsChanged();
+  }
+
+  /**
+   * Fold any rename, reface or recolour in a batch into the conversation row itself.
+   *
+   * The name a place goes by has to survive being read: a device that comes back after a week
+   * holds a row that was written when it was created, and the rename that happened on Tuesday is
+   * a message like any other. Applying it here — where messages arrive, rather than where they
+   * are drawn — is what makes the sidebar, the notification and the thread all say the same
+   * thing, whether or not anybody has opened the room since.
+   *
+   * Events older than the change we already applied are ignored, so a history replay of the whole
+   * week cannot walk the name backwards through every rename it ever had.
+   */
+  function withMeta(conv: Conversation, opened: OpenedMessage[]): Conversation | null {
+    if (conv.kind !== "group") return null;
+    const fresh = opened.map(o => o.message)
+      .filter(m => m.payload.type === "event" && m.payload.event?.kind === "meta" && m.createdAt > (conv.metaAt ?? 0));
+    if (!fresh.length) return null;
+    const meta = foldMeta(fresh);
+    const at = Math.max(...fresh.map(m => m.createdAt));
+    return {
+      ...conv,
+      metaAt: at,
+      ...(meta.title ? { title: meta.title } : {}),
+      ...(meta.emoji ? { emoji: meta.emoji } : {}),
+      ...(meta.color ? { color: meta.color } : {})
+    };
   }
 
   /**
@@ -187,10 +234,11 @@ export function useConversationSync({ identity, conversations, activeId, online,
     await putMessages(opened.map(o => o.message));
     eventsRef.current.onMessages(conversationId, opened.map(o => o.message));
 
-    const summary = summarize(conv, opened, {
+    const renamed = withMeta(conv, opened);
+    const summary = summarize(renamed ?? conv, opened, {
       myDeviceId: me.deviceId,
       activeAndVisible: conversationId === activeIdRef.current && !document.hidden
-    });
+    }) ?? renamed;
     if (!summary) return;
     await putConversation(summary);
     eventsRef.current.onConversationsChanged();
@@ -207,10 +255,11 @@ export function useConversationSync({ identity, conversations, activeId, online,
     await putMessage(opened.message);
     eventsRef.current.onMessages(conversationId, [opened.message]);
 
-    const summary = summarize(conv, [opened], {
+    const renamed = withMeta(conv, [opened]);
+    const summary = summarize(renamed ?? conv, [opened], {
       myDeviceId: me.deviceId,
       activeAndVisible: conversationId === activeIdRef.current && !document.hidden
-    });
+    }) ?? renamed;
     if (summary) {
       await putConversation(summary);
       eventsRef.current.onConversationsChanged();

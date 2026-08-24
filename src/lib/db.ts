@@ -71,6 +71,20 @@ async function write(store: string, fn: (s: IDBObjectStore) => void): Promise<vo
   return committed(tx);
 }
 
+/**
+ * Small standing preferences — which conversation to open into, and whatever follows it.
+ *
+ * They share the `meta` store with the identity rather than getting one of their own, so adding
+ * one never costs a schema version. Anything stored here has to survive not being there: a device
+ * that has never set it reads null and the caller decides what that means.
+ */
+export async function getSetting<T>(key: string): Promise<T | null> {
+  return (await read<T>("meta", s => s.get(`setting:${key}`))) ?? null;
+}
+export async function putSetting<T>(key: string, value: T): Promise<void> {
+  return write("meta", s => { s.put(value, `setting:${key}`); });
+}
+
 export async function getIdentity(): Promise<LocalIdentity | null> {
   return (await read<LocalIdentity>("meta", s => s.get("identity"))) ?? null;
 }

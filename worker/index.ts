@@ -852,6 +852,29 @@ export class ConversationRoom extends DurableObject<Env> {
     return json(meta, 201);
   }
 
+  /**
+   * Rename the room, as far as the relay is concerned.
+   *
+   * This is the plaintext copy — the one a push notification is built from when nothing of the
+   * family's is running to decrypt anything. It is not what any client displays: they fold the
+   * rename out of the message stream, which the relay cannot read. So this route is allowed to
+   * fail, and a room whose title here has gone stale is a worse notification, not a wrong app.
+   *
+   * Full members only, for the same reason inviting is: a guest was let in, not handed the place.
+   */
+  private async renameRoom(requester: Member, body: string): Promise<Response> {
+    if (!isFullMember(requester)) return error("Only a full member can rename this", 403);
+    let incoming: { title?: string };
+    try { incoming = JSON.parse(body); } catch { return error("Invalid body"); }
+    const title = String(incoming?.title ?? "").trim();
+    if (!title) return error("Missing title");
+    const meta = await this.meta();
+    if (!meta) return error("Room not found", 404);
+    const next: RoomMeta = { ...meta, title: title.slice(0, 80) };
+    await this.ctx.storage.put("meta", next);
+    return json(next);
+  }
+
   private async putMember(requester: Member, body: string): Promise<Response> {
     let incoming: Member;
     try { incoming = JSON.parse(body); } catch { return error("Invalid body"); }
@@ -1120,6 +1143,12 @@ export class ConversationRoom extends DurableObject<Env> {
 
     const meta = await this.meta();
     if (!meta) return error("Room not found", 404);
+
+    if (tail === "" && request.method === "PATCH") {
+      const signed = await this.verifySignedRequest(request);
+      if (!signed) return error("Unauthorized", 401);
+      return this.renameRoom(signed.member, signed.body);
+    }
 
     if (tail === "/ws" && request.method === "GET") {
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return error("Expected websocket", 426);

@@ -1,6 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deriveChannelKey, generateIdentity, inviteSecret, openChannelMeta, openInvite, randomKey, sealChannelMeta, sealInvite } from "./crypto";
-import { anonymousProfile, canPost, inviteCodeFor, inviteLink, isFullMember, parseInviteLink, spaceTree } from "./spaces";
+import { anonymousProfile, canPost, discoverChannels, inviteCodeFor, inviteLink, isFullMember, parseInviteLink, spaceTree } from "./spaces";
+import type { ChannelRecord, LocalIdentity } from "./types";
+import { generateIdentity as makeIdentity } from "./crypto";
+
+const relay = vi.hoisted(() => ({ listChannels: vi.fn(), joinChannel: vi.fn() }));
+vi.mock("./relay", () => ({
+  listChannels: relay.listChannels,
+  joinChannel: relay.joinChannel,
+  createInvite: vi.fn(), createRoom: vi.fn(), previewInvite: vi.fn(),
+  publishChannel: vi.fn(), redeemInvite: vi.fn(), unpublishChannel: vi.fn()
+}));
 import type { Conversation } from "./types";
 
 describe("channel keys", () => {
@@ -196,5 +206,60 @@ describe("what a role allows", () => {
 
   it("stops a viewer posting", () => {
     expect(canPost(conv("viewer"))).toBe(false);
+  });
+});
+
+describe("discoverChannels", () => {
+  let me: LocalIdentity;
+  let space: Conversation;
+  const record = async (id: string, meta: { title: string; emoji: string; at?: number; color?: string }): Promise<ChannelRecord> => ({
+    id, createdAt: 0, ...(await sealChannelMeta(space.key, meta))
+  });
+
+  beforeEach(async () => {
+    me = await makeIdentity("Alice");
+    space = { id: "space-1", kind: "group", title: "Family", key: randomKey(), members: [], createdAt: 0 };
+    relay.listChannels.mockReset();
+    relay.joinChannel.mockReset();
+  });
+
+  it("joins a channel this device has never seen", async () => {
+    relay.listChannels.mockResolvedValue([await record("c1", { title: "Japan trip", emoji: "🗾", at: 10 })]);
+    const { joined, renamed } = await discoverChannels(me, space, new Map());
+    expect(joined.map(c => c.title)).toEqual(["Japan trip"]);
+    expect(joined[0].metaAt).toBe(10);
+    expect(renamed).toEqual([]);
+    expect(relay.joinChannel).toHaveBeenCalledOnce();
+  });
+
+  it("reports a channel we already hold that has since been renamed", async () => {
+    relay.listChannels.mockResolvedValue([await record("c1", { title: "Beach trip", emoji: "🏖️", at: 500 })]);
+    const held: Conversation = { id: "c1", kind: "group", title: "Japan trip", emoji: "🗾", key: "k", members: [], createdAt: 0, spaceId: space.id, metaAt: 10 };
+    const { joined, renamed } = await discoverChannels(me, space, new Map([["c1", held]]));
+    expect(joined).toEqual([]);
+    expect(renamed).toEqual([{ id: "c1", meta: { title: "Beach trip", emoji: "🏖️", at: 500 } }]);
+    expect(relay.joinChannel).not.toHaveBeenCalled(); // we are already in it
+  });
+
+  it("leaves a name alone when the directory is the one that has fallen behind", async () => {
+    // The rename travelled as an event and was folded in already; the directory copy is older.
+    relay.listChannels.mockResolvedValue([await record("c1", { title: "Japan trip", emoji: "🗾", at: 10 })]);
+    const held: Conversation = { id: "c1", kind: "group", title: "Beach trip", emoji: "🏖️", key: "k", members: [], createdAt: 0, spaceId: space.id, metaAt: 500 };
+    expect((await discoverChannels(me, space, new Map([["c1", held]]))).renamed).toEqual([]);
+  });
+
+  it("says nothing about a channel whose name has not changed", async () => {
+    relay.listChannels.mockResolvedValue([await record("c1", { title: "Japan trip", emoji: "🗾", at: 500 })]);
+    const held: Conversation = { id: "c1", kind: "group", title: "Japan trip", emoji: "🗾", key: "k", members: [], createdAt: 0, spaceId: space.id, metaAt: 10 };
+    expect((await discoverChannels(me, space, new Map([["c1", held]]))).renamed).toEqual([]);
+  });
+
+  it("lists everything the directory holds, so a deletion can travel to a sleeping device", async () => {
+    relay.listChannels.mockResolvedValue([
+      await record("c1", { title: "Japan trip", emoji: "🗾", at: 1 }),
+      await record("c2", { title: "Homework", emoji: "📚", at: 1 })
+    ]);
+    const { present } = await discoverChannels(me, space, new Map());
+    expect([...present].sort()).toEqual(["c1", "c2"]);
   });
 });

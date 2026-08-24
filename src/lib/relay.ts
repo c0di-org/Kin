@@ -28,6 +28,19 @@ export async function createRoom(
 }
 
 /**
+ * Rename a room on the relay.
+ *
+ * The relay has always held a group's title in the clear, because a push notification arrives
+ * when nothing of ours is running and has to say which room it is about. Renaming without this
+ * would leave every notification calling the room by a name nobody uses any more — so the
+ * plaintext copy is kept honest rather than left to rot. Nothing else about the room is readable
+ * from it, and a room that would rather not be named can be called anything at all.
+ */
+export async function renameRoom(identity: LocalIdentity, roomId: string, title: string): Promise<void> {
+  await signedJson(identity, "PATCH", `/api/rooms/${encodeURIComponent(roomId)}`, { title });
+}
+
+/**
  * Walk into a channel on the strength of being in its space.
  *
  * The other way in — somebody already inside adding you — needs them online at the moment you

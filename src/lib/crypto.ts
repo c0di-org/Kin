@@ -1,4 +1,4 @@
-import type { ChatPayload, CipherEnvelope, LocalIdentity, PublicMember } from "./types";
+import type { ChannelMeta, ChatPayload, CipherEnvelope, LocalIdentity, PublicMember } from "./types";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -166,17 +166,17 @@ export async function deriveChannelKey(spaceKey: string, channelId: string): Pro
 }
 
 /** Encrypt a channel's name and emoji under the space key, for the relay to hold and not read. */
-export async function sealChannelMeta(spaceKey: string, meta: { title: string; emoji: string }): Promise<{ blob: string; iv: string }> {
+export async function sealChannelMeta(spaceKey: string, meta: ChannelMeta): Promise<{ blob: string; iv: string }> {
   const key = await deriveAesFrom(unb64(spaceKey), "channel-directory", false);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const blob = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(meta)));
   return { blob: b64(blob), iv: b64(iv) };
 }
 
-export async function openChannelMeta(spaceKey: string, blob: string, iv: string): Promise<{ title: string; emoji: string }> {
+export async function openChannelMeta(spaceKey: string, blob: string, iv: string): Promise<ChannelMeta> {
   const key = await deriveAesFrom(unb64(spaceKey), "channel-directory", false);
   const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, key, unb64(blob));
-  return JSON.parse(dec.decode(clear)) as { title: string; emoji: string };
+  return JSON.parse(dec.decode(clear)) as ChannelMeta;
 }
 
 /**
