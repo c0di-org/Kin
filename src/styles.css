@@ -237,6 +237,25 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   display: grid; place-items: center; box-shadow: 0 6px 14px rgba(255, 119, 189, .5), var(--gloss);
   animation: pop-in .34s cubic-bezier(.3, 1.7, .5, 1);
 }
+/* Something happened that is not a message. A dot rather than a number, because the number is
+   also the badge on the app icon and a ticked shopping list is not twelve unread messages. */
+.unread.quiet { min-width: 10px; width: 10px; height: 10px; padding: 0; background: var(--accent-2); box-shadow: none; }
+
+/* the colour picker in the editor */
+.tone-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 4px; }
+.tone-swatch {
+  width: 44px; height: 44px; border-radius: 16px; display: grid; place-items: center;
+  color: #fff; font-size: 17px; font-weight: 900; border: 2px solid transparent;
+  box-shadow: var(--gloss), 0 4px 10px rgba(64, 60, 130, .18);
+  transition: transform .16s cubic-bezier(.3, 1.6, .5, 1);
+}
+.tone-swatch:hover { transform: scale(1.08); }
+.tone-swatch.picked { border-color: var(--ink); transform: scale(1.06); }
+.tone-swatch b { text-shadow: 0 1px 3px rgba(0, 0, 0, .45); }
+
+/* the group faces under the name field on the way in */
+.face-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: -4px; }
+
 .new-chat {
   position: absolute; right: 22px; bottom: calc(var(--safe-bottom) + 22px);
   width: 62px; height: 62px; border-radius: 26px; background: var(--grad); color: #fff;
@@ -978,6 +997,15 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   .toast { background: rgba(255, 255, 255, .14); }
   .lightbox-bar .chip-btn { background: rgba(40, 36, 80, .92); color: #f2f0ff; }
   .sheet-title button { border-color: var(--glass-line); }
+  .channel-pill { background: rgba(255, 255, 255, .06); }
+  .news span, .channel-bar { background: rgba(255, 255, 255, .05); }
+  .tone-swatch.picked { border-color: #fff; }
+  .tone-sky { --accent-ink: #3c8edf; --tint: rgba(80, 153, 226, 0.18); --grad-soft: linear-gradient(135deg, rgba(88, 186, 228, 0.22), rgba(88, 116, 228, 0.22)); }
+  .tone-mint { --accent-ink: #25a766; --tint: rgba(88, 218, 153, 0.18); --grad-soft: linear-gradient(135deg, rgba(96, 220, 183, 0.22), rgba(96, 220, 216, 0.22)); }
+  .tone-sun { --accent-ink: #cf741a; --tint: rgba(233, 153, 73, 0.18); --grad-soft: linear-gradient(135deg, rgba(230, 184, 55, 0.22), rgba(234, 123, 83, 0.22)); }
+  .tone-coral { --accent-ink: #e75d66; --tint: rgba(228, 78, 88, 0.18); --grad-soft: linear-gradient(135deg, rgba(230, 115, 86, 0.22), rgba(230, 86, 134, 0.22)); }
+  .tone-bubble { --accent-ink: #e550b8; --tint: rgba(228, 78, 183, 0.18); --grad-soft: linear-gradient(135deg, rgba(230, 86, 158, 0.22), rgba(220, 86, 230, 0.22)); }
+  .tone-plum { --accent-ink: #9e74e7; --tint: rgba(134, 82, 224, 0.18); --grad-soft: linear-gradient(135deg, rgba(172, 90, 226, 0.22), rgba(113, 90, 226, 0.22)); }
 }
 
 /* ---------- reduced motion ---------- */
@@ -1083,6 +1111,124 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .sheet .onboard-label { margin-top: 10px; }
 .sheet .onboard-label:first-of-type { margin-top: 2px; }
 .choice-row, .pill-row { margin-bottom: 4px; }
+
+
+/* ---------- tones ----------
+   A conversation can be painted in one of these; no class at all is Kin's own candy palette.
+   They live here rather than in an inline style because half of the values have to change
+   between light and dark to keep their contrast, and a style attribute cannot answer a media
+   query.
+
+   Solved, not picked: white clears 5:1 on every stop of every --grad-mine (the outgoing bubble
+   carries 16.5px body text and a 10.5px stamp), and each --accent-ink clears 4.6:1 on --paper in
+   both themes. Anything added here has to be run through the same arithmetic. */
+.tone-sky {
+  --accent: #5099e2;
+  --accent-ink: #2074c8;
+  --accent-2: #5874e4;
+  --grad: linear-gradient(135deg, #58bae4 0%, #589ee4 48%, #5874e4 100%);
+  --grad-mine: linear-gradient(135deg, #1a769e 0%, #1f70c1 48%, #4564e1 100%);
+  --grad-soft: linear-gradient(135deg, rgba(88, 186, 228, 0.18), rgba(88, 116, 228, 0.18));
+  --tint: rgba(80, 153, 226, 0.1);
+  --glow: 0 12px 28px rgba(80, 153, 226, 0.34);
+}
+.tone-mint {
+  --accent: #58da99;
+  --accent-ink: #1c824f;
+  --accent-2: #60dcd8;
+  --grad: linear-gradient(135deg, #60dcb7 0%, #60dc9e 48%, #60dcd8 100%);
+  --grad-mine: linear-gradient(135deg, #1c7d60 0%, #1c7d4d 48%, #1b7b78 100%);
+  --grad-soft: linear-gradient(135deg, rgba(96, 220, 183, 0.18), rgba(96, 220, 216, 0.18));
+  --tint: rgba(88, 218, 153, 0.1);
+  --glow: 0 12px 28px rgba(88, 218, 153, 0.34);
+}
+.tone-sun {
+  --accent: #e99949;
+  --accent-ink: #aa6015;
+  --accent-2: #ea7b53;
+  --grad: linear-gradient(135deg, #e6b837 0%, #e68f37 48%, #ea7b53 100%);
+  --grad-mine: linear-gradient(135deg, #8a6a11 0%, #a65d14 48%, #c14518 100%);
+  --grad-soft: linear-gradient(135deg, rgba(230, 184, 55, 0.18), rgba(234, 123, 83, 0.18));
+  --tint: rgba(233, 153, 73, 0.1);
+  --glow: 0 12px 28px rgba(233, 153, 73, 0.34);
+}
+.tone-coral {
+  --accent: #e44e58;
+  --accent-ink: #de212e;
+  --accent-2: #e65686;
+  --grad: linear-gradient(135deg, #e67356 0%, #e65660 48%, #e65686 100%);
+  --grad-mine: linear-gradient(135deg, #c8401e 0%, #d7202c 48%, #d5205c 100%);
+  --grad-soft: linear-gradient(135deg, rgba(230, 115, 86, 0.18), rgba(230, 86, 134, 0.18));
+  --tint: rgba(228, 78, 88, 0.1);
+  --glow: 0 12px 28px rgba(228, 78, 88, 0.34);
+}
+.tone-bubble {
+  --accent: #e44eb7;
+  --accent-ink: #d11f9b;
+  --accent-2: #dc56e6;
+  --grad: linear-gradient(135deg, #e6569e 0%, #e656bb 48%, #dc56e6 100%);
+  --grad-mine: linear-gradient(135deg, #d11f78 0%, #ca1e96 48%, #bc1ec8 100%);
+  --grad-soft: linear-gradient(135deg, rgba(230, 86, 158, 0.18), rgba(220, 86, 230, 0.18));
+  --tint: rgba(228, 78, 183, 0.1);
+  --glow: 0 12px 28px rgba(228, 78, 183, 0.34);
+}
+.tone-plum {
+  --accent: #8652e0;
+  --accent-ink: #8754e1;
+  --accent-2: #715ae2;
+  --grad: linear-gradient(135deg, #ac5ae2 0%, #8c5ae2 48%, #715ae2 100%);
+  --grad-mine: linear-gradient(135deg, #9d3edd 0%, #844fe0 48%, #6f58e2 100%);
+  --grad-soft: linear-gradient(135deg, rgba(172, 90, 226, 0.18), rgba(113, 90, 226, 0.18));
+  --tint: rgba(134, 82, 224, 0.1);
+  --glow: 0 12px 28px rgba(134, 82, 224, 0.34);
+}
+
+/* ---------- channels along the top of a conversation ----------
+   A space is a place with rooms in it, and you should not have to leave the house to walk down
+   its own hallway. Only drawn once a space has channels — a plain family group stays flat. */
+.channel-bar {
+  flex: none; display: flex; gap: 6px; align-items: center;
+  padding: 7px max(10px, var(--safe-right)) 7px max(10px, var(--safe-left));
+  overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--line);
+  background: var(--paper-2);
+}
+.channel-bar::-webkit-scrollbar { display: none; }
+.channel-pill {
+  flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 13px;
+  border-radius: 999px; font-size: 13.5px; font-weight: 800; color: var(--sub);
+  background: var(--paper); border: 1px solid var(--glass-line);
+  transition: color .16s, background .16s, transform .16s cubic-bezier(.3, 1.5, .5, 1);
+}
+.channel-pill:hover { color: var(--accent-ink); }
+.channel-pill:active { transform: scale(.95); }
+.channel-pill em { font-style: normal; max-width: 13ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel-pill.active { color: #fff; background: var(--grad-mine); border-color: transparent; box-shadow: var(--gloss); }
+.channel-new { font-size: 16px; font-weight: 900; padding: 7px 12px; }
+.pill-count {
+  flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  font-size: 11px; font-weight: 900; font-style: normal; display: grid; place-items: center;
+  color: #fff; background: var(--accent-2);
+}
+.channel-pill.active .pill-count { color: var(--accent-ink); background: #fff; }
+.pill-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); }
+
+/* ---------- the room talking about itself ----------
+   A rename, an arrival, somebody leaving. Centred and quiet: it is the room's own news, not
+   anybody's message, and it must not read as one. */
+.news { display: grid; place-items: center; margin: 12px 0 2px; }
+.news span {
+  max-width: 80%; text-align: center; padding: 5px 13px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 800; color: var(--sub); background: var(--paper-2);
+  border: 1px solid var(--glass-line);
+}
+/* Where the unread began. Same shape as a day heading, in the accent, with a rule running out
+   from it so the eye catches it while scrolling past. */
+.day.unread-mark { position: relative; margin: 18px 0 8px; }
+.day.unread-mark span { color: #fff; background: var(--grad-mine); border-color: transparent; }
+.day.unread-mark::before {
+  content: ""; position: absolute; left: 8px; right: 8px; top: 50%; height: 2px;
+  background: var(--tint); border-radius: 999px; z-index: -1;
+}
 
 /* ---------- pinned ----------
    A strip under the header rather than a bubble that floats over the thread: it has to be

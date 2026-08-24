@@ -1,16 +1,16 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, wrapConversationKey } from "./lib/crypto";
-import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage, undismissDirect } from "./lib/db";
+import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, getSetting, listConversations, listMessages, putConversation, putIdentity, putMessage, putSetting, undismissDirect } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
-import { addRoomMember, claimPair, completePair, createPair, createRoom, dropEncryptedFile, dropEnvelope, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
+import { addRoomMember, claimPair, completePair, createPair, createRoom, dropEncryptedFile, dropEnvelope, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, renameRoom, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
 import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, InvitePreview, ListItem, LocalIdentity, PublicMember } from "./lib/types";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, resolveAttachment, saveToDevice } from "./lib/media";
 import {
   acceptInvite, canPost, createChannel, createSpace, discoverChannels, isFullMember,
-  parseInviteLink, removeChannel, spaceTree
+  parseInviteLink, removeChannel, republishChannel, spaceTree
 } from "./lib/spaces";
-import { deletedIds, firstName, foldLists, mergeMessages, pinnedIds, previewOf, redact } from "./lib/ingest";
+import { deletedIds, firstName, foldLists, isSystemEvent, mergeMessages, pinnedIds, previewOf, previewOfEvent, redact } from "./lib/ingest";
 import { rememberDeparted } from "./lib/roster";
 import { dayLabel, greeting, listStamp } from "./lib/format";
 import { useConversationSync } from "./hooks/useConversationSync";
@@ -29,10 +29,13 @@ import NewSpace from "./components/NewSpace";
 import NewList from "./components/NewList";
 import { PinnedStrip } from "./components/PinnedStrip";
 import { Bubble, type QuotedMessage } from "./components/Bubble";
+import { ChannelBar } from "./components/ChannelBar";
+import { SpaceEditor } from "./components/SpaceEditor";
+import { toneClass } from "./lib/tones";
 import { Sheet } from "./components/Sheet";
 import { SafetyCheck } from "./components/SafetyCheck";
 
-type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list";
+type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 // One shared empty array, so a thread we have not read yet keeps the same identity across renders
@@ -43,7 +46,7 @@ const PANEL_LABELS: Record<Panel, string> = {
   none: "", doodle: "Doodle", pair: "Add someone in person", invite: "Share a link",
   join: "Join with a code", members: "Chat details", settings: "Settings",
   attach: "Send something", add: "Start something", profile: "Your look",
-  new: "Make a new place", safety: "Safety check", list: "Start a list"
+  new: "Make a new place", safety: "Safety check", list: "Start a list", edit: "Edit this place"
 };
 
 
@@ -51,6 +54,15 @@ export default function App() {
   const [identity, setIdentity] = useState<LocalIdentity | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(new URLSearchParams(location.search).get("conversation"));
+  /** The conversation Kin opens into, when the URL is not asking for a particular one. */
+  const [homeId, setHomeId] = useState<string | null>(null);
+  /**
+   * Where the unread began when this thread was opened, for the line that says so.
+   *
+   * Captured before `markRead` moves `lastReadAt` to now — a moment later there is nothing left
+   * to draw a line from, which is why this is state of its own rather than read off the row.
+   */
+  const [readMark, setReadMark] = useState<number | null>(null);
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [draft, setDraft] = useState("");
   const [panel, setPanel] = useState<Panel>("none");
@@ -125,10 +137,67 @@ export default function App() {
   // Collapsing the two is what made a full thread claim to be empty for a moment on the way in.
   const threadLoaded = !!activeId && messages[activeId] !== undefined;
 
+  /**
+   * Open a conversation, or go back to the list.
+   *
+   * Kin used to start on the list, so the list was where the browser's own back button went: out
+   * of the app. Starting inside a conversation makes that wrong — on Android the back gesture
+   * would close Kin from the screen people spend all their time on. So the list is the entry the
+   * app is launched on and a conversation is pushed on top of it, which is what makes back mean
+   * "show me my chats" and only then "leave".
+   *
+   * Moving sideways — one channel to the next — replaces rather than pushes, or backing out of a
+   * space would walk you through every channel you glanced at on the way in.
+   */
+  const openChat = useCallback((id: string | null): void => {
+    // What the history entry says, rather than what React last rendered: push and replace take
+    // effect this instant, so two switches in one tick cannot disagree about where we are.
+    const shown = (history.state as { conversationId?: string } | null)?.conversationId ?? null;
+    if (id === shown) return;
+    if (!id) {
+      if (shown) return history.back(); // popstate does the rest, and the stack stays two deep
+      setActiveId(null);
+      return;
+    }
+    const url = `${location.pathname}?conversation=${encodeURIComponent(id)}`;
+    if (shown) history.replaceState({ conversationId: id }, "", url);
+    else history.pushState({ conversationId: id }, "", url);
+    setActiveId(id);
+  }, []);
+
+  // The back gesture, and the one the chat header draws. Both land here, and neither one of them
+  // may push: `popstate` fires *after* the entry is gone, so pushing would put it straight back.
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      const id = (e.state as { conversationId?: string } | null)?.conversationId ?? null;
+      setActiveId(id);
+      setPanel("none");
+    };
+    addEventListener("popstate", onPop);
+    return () => removeEventListener("popstate", onPop);
+  }, []);
+
   const flash = (s: string) => { setToast(s); setTimeout(() => setToast(""), 2400); };
   const noteEntering = (id: string) => setEntering(s => new Set(s).add(id));
   async function refresh() { setConversations(await listConversations()); }
   async function refreshPush() { setPushStatus(await currentPushStatus()); }
+
+  /**
+   * Which conversation the app opens into.
+   *
+   * Kin used to open onto a list of chats, on a phone every single time. A list is the right
+   * answer for an app whose job is to be a filing cabinet, and the wrong one for the app a family
+   * has one main conversation in: it put a screen with nothing on it between somebody and the
+   * only room they wanted. So the answer is the place they said to open in, and failing that the
+   * group they have been in longest — the family, in every case that matters, since it is the one
+   * onboarding makes.
+   */
+  function landingConversation(cs: Conversation[], home: string | null): string | null {
+    if (home && cs.some(c => c.id === home)) return home;
+    const spaces = cs.filter(c => c.kind === "group" && !c.spaceId);
+    const oldest = [...spaces].sort((a, b) => a.createdAt - b.createdAt)[0];
+    return oldest?.id ?? [...cs].sort((a, b) => (b.lastMessageAt ?? b.createdAt) - (a.lastMessageAt ?? a.createdAt))[0]?.id ?? null;
+  }
 
   // ---------- boot ----------
   useEffect(() => {
@@ -137,7 +206,19 @@ export default function App() {
       setIdentity(id);
       const cs = await listConversations();
       setConversations(cs);
-      if (!activeIdRef.current && innerWidth > 760) setActiveId(cs[0]?.id ?? null);
+      const home = await getSetting<string>("home");
+      setHomeId(home);
+      // A link or a notification asking for a particular conversation outranks the standing answer,
+      // and anything asking for one this device does not hold is ignored rather than obeyed.
+      const asked = activeIdRef.current;
+      const landing = asked && cs.some(c => c.id === asked) ? asked : landingConversation(cs, home);
+      // Two entries, always: the list underneath and the conversation on top. That is what gives
+      // the back gesture somewhere to go other than out of the app.
+      history.replaceState({ conversationId: null }, "", location.pathname);
+      if (landing) {
+        history.pushState({ conversationId: landing }, "", `${location.pathname}?conversation=${encodeURIComponent(landing)}`);
+      }
+      setActiveId(landing);
       if (id && joinCode) setPanel("join");
       setReady(true);
       setPushStatus(await currentPushStatus());
@@ -155,7 +236,7 @@ export default function App() {
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; conversationId?: string } | undefined;
-      if (data?.type === "kin-open" && data.conversationId) setActiveId(data.conversationId);
+      if (data?.type === "kin-open" && data.conversationId) openChat(data.conversationId);
       if (data?.type === "kin-push" && data.conversationId && data.conversationId !== activeIdRef.current) {
         void (async () => {
           const current = (await listConversations()).find(c => c.id === data.conversationId);
@@ -183,9 +264,9 @@ export default function App() {
     const q = new URLSearchParams(location.search);
     if (q.get("shared") === "1") void intakeShare();
     if (q.get("compose") === "doodle" && conversations.length) {
-      setActiveId(activeIdRef.current ?? conversations[0].id);
+      openChat(activeIdRef.current ?? conversations[0].id);
       setPanel("doodle");
-      window.history.replaceState({}, "", "/");
+      dropLaunchQuery();
     }
   }, [ready, identity?.deviceId, conversations.length]);
 
@@ -205,7 +286,7 @@ export default function App() {
         }
         await cache.delete(req);
       }
-      window.history.replaceState({}, "", "/");
+      dropLaunchQuery();
       if (files.length || text) setShareIntake({ files, text });
     } catch { /* nothing shared */ }
   }
@@ -226,6 +307,11 @@ export default function App() {
         setTyping(t => active ? [...new Set([...t, senderDeviceId])] : t.filter(x => x !== senderDeviceId));
       },
       onKeyChange: warnKeyChange,
+      onRemoved: convId => void (async () => {
+        const gone = (await listConversations()).find(c => c.id === convId);
+        if (gone) flash(`You’re no longer in ${gone.title}`);
+        buzz(30);
+      })(),
       // A channel appeared in a space we are in — pull the directory now rather than waiting out
       // the sweep, which is the difference between "instantly" and "within thirty seconds".
       onChannelAdded: () => { void sweepChannels(); },
@@ -262,7 +348,7 @@ export default function App() {
   async function markRead(convId: string): Promise<void> {
     const me = identityRef.current; if (!me) return;
     const conv = (await listConversations()).find(c => c.id === convId); if (!conv) return;
-    await putConversation({ ...conv, unread: 0, lastReadAt: Date.now() });
+    await putConversation({ ...conv, unread: 0, nudge: false, lastReadAt: Date.now() });
     await refresh();
     const msgs = await listMessages(convId);
     const lastIn = [...msgs].reverse().find(m => m.senderDeviceId !== me.deviceId && m.payload.type !== "event");
@@ -348,6 +434,10 @@ export default function App() {
     void (async () => {
       const cached = await listMessages(activeId);
       setMessages(x => ({ ...x, [activeId]: mergeMessages(cached, x[activeId] ?? []) }));
+      // Read off the row before markRead moves it, and only when there was actually something
+      // waiting — a line saying "new messages" above a thread nobody has missed is noise.
+      const conv = (await listConversations()).find(c => c.id === activeId);
+      setReadMark(conv && (conv.unread ?? 0) > 0 ? conv.lastReadAt ?? null : null);
       await markRead(activeId);
     })();
     setTyping([]); setReactFor(null); setReplyTo(null); setConfirming(null); setEntering(new Set());
@@ -428,6 +518,22 @@ export default function App() {
         ? "Couldn’t send — tap the message to retry"
         : "Saved — this goes out when you’re back online");
     }
+  }
+
+  /**
+   * Tell a room something about itself — that somebody arrived, or is leaving.
+   *
+   * Deliberately not `send`: there is no optimistic row to draw (the news is about the sender, so
+   * their own copy would only ever say "you"), nothing to retry, and nothing worth a failure
+   * toast in the middle of walking into or out of a room. If it does not land, the roster still
+   * carries the fact — this only decides whether anybody is *told*.
+   */
+  async function announce(conv: Conversation, payload: ChatPayload): Promise<void> {
+    const me = identityRef.current; if (!me) return;
+    try {
+      const env = await signEnvelope(me, await encryptPayload(conv.id, conv.key, me.deviceId, payload));
+      await sendEnvelope(conv.id, env);
+    } catch { /* the room finds out from the roster instead */ }
   }
 
   async function sendText(): Promise<void> {
@@ -594,11 +700,14 @@ export default function App() {
     await send(active, { type: "list", list: { title, items } });
   }
 
-  async function tickItem(listId: string, itemId: string, done: boolean): Promise<void> {
+  async function tickItem(listId: string, itemId: string, done: boolean, text?: string): Promise<void> {
     if (!active) return;
     buzz(6);
     if (done) sounds.react();
-    await send(active, { type: "event", event: { kind: "check", targetId: listId, value: itemId, done } });
+    // The line's text rides along so the sidebar can say "ticked off milk" without holding the
+    // list it belongs to — the fold still works off the id, and an event from an older build that
+    // carries no text simply says "something".
+    await send(active, { type: "event", event: { kind: "check", targetId: listId, value: itemId, done, ...(text ? { item: { id: itemId, text } } : {}) } });
   }
 
   async function addListItem(listId: string, text: string): Promise<void> {
@@ -607,9 +716,9 @@ export default function App() {
     await send(active, { type: "event", event: { kind: "additem", targetId: listId, item: { id: randomId(), text: text.slice(0, 120) } } });
   }
 
-  async function removeListItem(listId: string, itemId: string): Promise<void> {
+  async function removeListItem(listId: string, itemId: string, text?: string): Promise<void> {
     if (!active) return;
-    await send(active, { type: "event", event: { kind: "removeitem", targetId: listId, value: itemId } });
+    await send(active, { type: "event", event: { kind: "removeitem", targetId: listId, value: itemId, ...(text ? { item: { id: itemId, text } } : {}) } });
   }
 
   // ---------- voice notes ----------
@@ -676,7 +785,7 @@ export default function App() {
       const space = await createSpace(me, title, { emoji, keep });
       await putConversation(space);
       await refresh();
-      setActiveId(space.id);
+      openChat(space.id);
       confetti(); sounds.tada();
       flash(`${title} is yours — share a link to bring people in 🔗`);
     } catch { flash("Couldn’t make that — are you online?"); }
@@ -691,9 +800,49 @@ export default function App() {
       await putConversation(channel);
       await refresh();
       setOpenSpaces(x => ({ ...x, [space.id]: true }));
-      setActiveId(channel.id);
+      openChat(channel.id);
       sounds.tada();
     } catch { flash("Couldn’t make that channel — are you online?"); }
+  }
+
+  /**
+   * Rename, reface and recolour a group or a channel, for everybody.
+   *
+   * A name lives in more places than it looks. The copy on this device is what the sidebar reads;
+   * an event in the room is what every other device folds in; a channel's space keeps a sealed
+   * copy so that somebody joining next month arrives at the same names as everyone else; and the
+   * relay keeps a plaintext one purely so a push notification can say which room it is about.
+   *
+   * Only the first two matter for correctness, so they go first and the rest are best-effort: a
+   * rename that could not reach the relay is still a rename, and the sweep or the next edit will
+   * carry the rest of it. What is never done is the reverse — telling somebody it worked when the
+   * event itself did not go out.
+   */
+  async function savePlace(conv: Conversation, next: { title: string; emoji: string; color: string; home: boolean }): Promise<void> {
+    const me = identityRef.current; if (!me) return;
+    const at = Date.now();
+    const color = next.color === "candy" ? undefined : next.color;
+    const updated: Conversation = { ...conv, title: next.title, emoji: next.emoji, metaAt: at, ...(color ? { color } : {}) };
+    if (!color) delete updated.color;
+    setPanel("none");
+
+    await putConversation(updated);
+    if (next.home !== (homeId === conv.id)) {
+      const home = next.home ? conv.id : null;
+      await putSetting("home", home);
+      setHomeId(home);
+    }
+    await refresh();
+    await send(updated, { type: "event", event: { kind: "meta", targetId: conv.id, meta: { title: next.title, emoji: next.emoji, color: color ?? "candy" } } });
+
+    const space = conv.spaceId ? (await listConversations()).find(c => c.id === conv.spaceId) : null;
+    const carried = await Promise.allSettled([
+      renameRoom(me, conv.id, next.title),
+      ...(space ? [republishChannel(me, space, updated)] : [])
+    ]);
+    flash(carried.some(r => r.status === "rejected")
+      ? "Saved — the rest of it catches up when you’re back online"
+      : "Looking good! ✨");
   }
 
   async function dropChannel(channel: Conversation): Promise<void> {
@@ -706,7 +855,7 @@ export default function App() {
     try { await removeChannel(me, space, channel.id); }
     catch { return flash("Couldn’t remove that channel — are you online?"); }
     await forgetChannel(channel.id);
-    setActiveId(space.id); setPanel("none"); setConfirming(null);
+    openChat(space.id); setPanel("none"); setConfirming(null);
     await refresh();
     flash("Channel removed for everyone");
   }
@@ -732,7 +881,8 @@ export default function App() {
       await putConversation(existing ? { ...existing, key: conv.key, role: conv.role } : conv);
       clearInviteLanding();
       await refresh();
-      setActiveId(conv.id);
+      openChat(conv.id);
+      if (!existing) void announce(conv, { type: "event", event: { kind: "joined", targetId: conv.id } });
       confetti(); sounds.tada();
       flash(conv.role === "viewer" ? "You’re in — have a look around 👀" : `Welcome to ${conv.title}! 🎉`);
     } catch {
@@ -743,7 +893,17 @@ export default function App() {
 
   function clearInviteLanding(): void {
     setInviteLanding(null);
-    window.history.replaceState({}, "", location.pathname);
+    dropLaunchQuery();
+  }
+
+  /**
+   * Drop whatever the app was launched with — a share, a shortcut, an invite fragment — without
+   * losing where we are. Rewriting the URL to "/" also rewrote the history entry's state, so the
+   * back gesture then landed on a conversation the app no longer thought it was in.
+   */
+  function dropLaunchQuery(): void {
+    const id = activeIdRef.current;
+    history.replaceState({ conversationId: id }, "", id ? `${location.pathname}?conversation=${encodeURIComponent(id)}` : location.pathname);
   }
 
   /**
@@ -757,17 +917,26 @@ export default function App() {
     const me = identityRef.current;
     if (!me || !navigator.onLine) return;
     const convs = await listConversations();
-    const known = new Set(convs.map(c => c.id));
+    const known = new Map(convs.map(c => [c.id, c]));
     let found = false;
     let pruned = false;
+    let refaced = false;
     for (const space of convs) {
       if (space.kind !== "group" || space.spaceId) continue;
       try {
-        const { joined, present } = await discoverChannels(me, space, known);
+        const { joined, renamed, present } = await discoverChannels(me, space, known);
         for (const channel of joined) {
           await putConversation(channel);
-          known.add(channel.id);
+          known.set(channel.id, channel);
           found = true;
+        }
+        // A channel this device already has, called something else since. The directory carries
+        // the stamp of the edit, so this can only ever move a name forwards.
+        for (const { id, meta } of renamed) {
+          const mine = known.get(id);
+          if (!mine) continue;
+          await putConversation({ ...mine, title: meta.title, emoji: meta.emoji, metaAt: meta.at ?? Date.now(), ...(meta.color ? { color: meta.color } : {}) });
+          refaced = true;
         }
         // And drop what the directory no longer lists. The removal broadcast only reaches whoever
         // was connected at the time; this is how it reaches a device that was asleep — and without
@@ -779,7 +948,7 @@ export default function App() {
         }
       } catch { /* not reachable right now — the next sweep tries again */ }
     }
-    if (found || pruned) await refresh();
+    if (found || pruned || refaced) await refresh();
     if (found) sounds.receive();
   }
 
@@ -787,16 +956,19 @@ export default function App() {
   async function forgetChannel(channelId: string): Promise<void> {
     await deleteConversation(channelId);
     setMessages(x => { const { [channelId]: _gone, ...rest } = x; return rest; });
-    if (activeIdRef.current === channelId) { setActiveId(null); setPanel("none"); }
+    if (activeIdRef.current === channelId) { openChat(null); setPanel("none"); }
   }
 
   // ---------- family lifecycle ----------
-  async function createFamily(name: string, avatar: string, familyName: string): Promise<void> {
+  async function createFamily(name: string, avatar: string, familyName: string, familyEmoji: string): Promise<void> {
     const id = { ...(await generateIdentity(name)), avatarSeed: `e:${avatar}` };
-    const group: Conversation = { id: randomId(), kind: "group", title: familyName, key: randomKey(), members: [publicMember(id)], createdAt: Date.now() };
+    const group: Conversation = { id: randomId(), kind: "group", title: familyName, emoji: familyEmoji, key: randomKey(), members: [publicMember(id)], createdAt: Date.now() };
     await putIdentity(id); await putConversation(group);
+    // The first group is the one Kin opens into from now on, without anybody having to say so.
+    await putSetting("home", group.id);
+    setHomeId(group.id);
     try { await createRoom(id, group.id, "group", group.title, group.members); } catch { /* retried on next connect */ }
-    setIdentity(id); await refresh(); setActiveId(group.id);
+    setIdentity(id); await refresh(); openChat(group.id);
     confetti(); sounds.tada();
   }
 
@@ -817,8 +989,9 @@ export default function App() {
           let members = [pkg.creator, publicMember(id)];
           try { members = await roomMembers(id, pkg.group.id); } catch { /* keep pair members */ }
           const c: Conversation = { id: pkg.group.id, kind: "group", title: pkg.group.title, key, members, createdAt: Date.now() };
-          await putConversation(c); await refresh(); setActiveId(c.id);
-          window.history.replaceState({}, "", "/");
+          await putConversation(c); await refresh(); openChat(c.id);
+          void announce(c, { type: "event", event: { kind: "joined", targetId: c.id } });
+          dropLaunchQuery();
           confetti(); sounds.tada();
           // Worked out here, from the card that actually arrived, rather than read off the package.
           // `pkg.safetyCode` is a string the relay carried: displaying it made the check agree with
@@ -880,15 +1053,26 @@ export default function App() {
     setBusy(true);
     try {
       if (conv.kind === "group") {
+        // Say goodbye before going, while we are still allowed to post: afterwards the relay
+        // refuses our envelopes, and the room would simply find one day that we were not in it.
+        if (canPost(conv)) await announce(conv, { type: "event", event: { kind: "left", targetId: conv.id } });
         try { await removeRoomMember(me, conv.id, me.deviceId); }
         catch { setBusy(false); return flash("Couldn’t leave — are you online?"); }
+        // A space's channels are rooms of their own, and leaving only the space left every one of
+        // them on this device: still connected, still pushing, and unreachable from a sidebar that
+        // had nothing left to file them under.
+        for (const channel of (await listConversations()).filter(c => c.spaceId === conv.id)) {
+          try { await removeRoomMember(me, channel.id, me.deviceId); } catch { /* it goes locally regardless */ }
+          await deleteConversation(channel.id);
+          setMessages(x => { const { [channel.id]: _gone, ...rest } = x; return rest; });
+        }
       } else {
         // Otherwise the sweep below re-derives this room within thirty seconds and pulls it back.
         await dismissDirect(conv.id);
       }
       await deleteConversation(conv.id);
       setMessages(x => { const { [conv.id]: _gone, ...rest } = x; return rest; });
-      setActiveId(null); setPanel("none"); setConfirming(null);
+      openChat(null); setPanel("none"); setConfirming(null);
       await refresh();
       flash(conv.kind === "group" ? `You left ${conv.title}` : "Chat deleted");
     } finally { setBusy(false); }
@@ -910,6 +1094,7 @@ export default function App() {
       });
       await refresh();
       setConfirming(null);
+      void announce(conv, { type: "event", event: { kind: "left", targetId: conv.id, value: member.deviceId } });
       flash(`${firstName(member.displayName)} was removed`);
     } catch { flash("Couldn’t remove them — are you online?"); }
     finally { setBusy(false); }
@@ -921,10 +1106,10 @@ export default function App() {
     const existing = (await listConversations()).find(c => c.id === d.id);
     await undismissDirect(d.id);
     setPanel("none");
-    if (existing) return setActiveId(existing.id); // don't clobber the history we already have
+    if (existing) return openChat(existing.id); // don't clobber the history we already have
     const c: Conversation = { id: d.id, kind: "direct", title: peer.displayName, key: d.key, members: [publicMember(identity), peer], createdAt: Date.now() };
     try { await createRoom(identity, c.id, "direct", c.title, c.members); } catch { /* offline */ }
-    await putConversation(c); await refresh(); setActiveId(c.id);
+    await putConversation(c); await refresh(); openChat(c.id);
   }
 
   async function shareInvite(): Promise<void> {
@@ -957,14 +1142,14 @@ export default function App() {
 
   async function deliverShare(conv: Conversation): Promise<void> {
     const intake = shareIntake; if (!intake) return;
-    setShareIntake(null); setActiveId(conv.id);
+    setShareIntake(null); openChat(conv.id);
     for (const f of intake.files) await sendFile(conv, f);
     if (intake.text) setDraft(intake.text);
   }
 
   // ---------- derived ----------
   const sorted = useMemo(() => [...conversations].sort((a, b) => (b.lastMessageAt ?? b.createdAt) - (a.lastMessageAt ?? a.createdAt)), [conversations]);
-  const { visible, reactions, deleted, pins, lists } = useMemo(() => {
+  const { visible, news, reactions, deleted, pins, lists } = useMemo(() => {
     const sortedMsgs = [...activeMessages].sort((a, b) => a.createdAt - b.createdAt);
     const reactions = new Map<string, Record<string, string[]>>();
     for (const m of sortedMsgs) {
@@ -977,6 +1162,10 @@ export default function App() {
     }
     return {
       visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions,
+      // Renames, arrivals and departures are events like any other, but unlike a reaction they are
+      // about the room rather than about a message — so they get a line of their own instead of
+      // being folded invisibly into something else.
+      news: sortedMsgs.filter(m => isSystemEvent(m.payload)),
       deleted: deletedIds(sortedMsgs), pins: pinnedIds(sortedMsgs), lists: foldLists(sortedMsgs)
     };
   }, [activeMessages]);
@@ -990,6 +1179,16 @@ export default function App() {
   // space has channels there is a hierarchy to show, and a grid of equal cards is the one shape
   // that cannot show it, so the list takes over.
   const tree = useMemo(() => spaceTree(sorted), [sorted]);
+  /**
+   * The space the open conversation sits in, if it sits in one — whether it *is* the space or is
+   * a channel of it. This is what the bar along the top of the chat draws, and what makes moving
+   * between channels a sideways step rather than a trip out to the sidebar and back.
+   */
+  const openSpace = useMemo(() => {
+    if (!active) return null;
+    const node = tree.spaces.find(n => n.space.id === (active.spaceId ?? active.id));
+    return node && node.channels.length ? node : null;
+  }, [active, tree]);
   const showCards = sorted.length > 0 && sorted.length <= 3
     && !tree.orphans.length && tree.spaces.every(n => !n.channels.length);
   // Reload on every conversation refresh rather than off a digest: a chat can gain messages without
@@ -1021,9 +1220,57 @@ export default function App() {
 
   const nameFor = useCallback((deviceId: string): string => {
     if (deviceId === identity?.deviceId) return "You";
-    const member = active?.members.find(m => m.deviceId === deviceId);
+    // Somebody who has left is still the author of everything they said, and of the line saying
+    // they left — looking only at the current roster called all of it "Someone".
+    const member = active?.members.find(m => m.deviceId === deviceId)
+      ?? active?.pastMembers?.find(m => m.deviceId === deviceId);
     return member ? firstName(member.displayName) : "Someone";
   }, [identity?.deviceId, active]);
+
+  /** What a piece of the room's own news says, with the people in it named. */
+  const newsLine = useCallback((m: ChatMessage): string => {
+    const ev = m.payload.event;
+    const who = nameFor(m.senderDeviceId);
+    if (ev?.kind === "left" && ev.value) return `${nameFor(ev.value)} was removed by ${who.toLowerCase() === "you" ? "you" : who}`;
+    return `${who} ${previewOfEvent(m.payload) ?? "changed something"}`;
+  }, [nameFor]);
+
+  /**
+   * The thread as it is actually drawn: messages, the room's own news, day headings, and the line
+   * marking where the unread began.
+   *
+   * Built in one pass rather than three overlaid maps, because they all have to agree about order
+   * — a "renamed this" that floats above the message it followed is worse than not saying it.
+   * A system line also breaks up a run of messages from one person, so what follows it gets its
+   * name and face back instead of appearing to be part of what came before.
+   */
+  type Row =
+    | { kind: "msg"; at: number; m: ChatMessage; prev?: ChatMessage; last: boolean }
+    | { kind: "news"; at: number; m: ChatMessage }
+    | { kind: "day"; at: number }
+    | { kind: "mark"; at: number };
+  const timeline = useMemo(() => {
+    const merged = [
+      ...visible.map(m => ({ m, system: false })),
+      ...news.map(m => ({ m, system: true }))
+    ].sort((a, b) => a.m.createdAt - b.m.createdAt || (a.system ? 1 : -1));
+    const lastId = visible[visible.length - 1]?.id;
+    const rows: Row[] = [];
+    let prev: ChatMessage | undefined;
+    let day = "";
+    let marked = readMark === null;
+    for (const { m, system } of merged) {
+      const stamp = new Date(m.createdAt).toDateString();
+      if (stamp !== day) { rows.push({ kind: "day", at: m.createdAt }); day = stamp; prev = undefined; }
+      if (!marked && m.createdAt > readMark! && m.senderDeviceId !== identity?.deviceId) {
+        rows.push({ kind: "mark", at: m.createdAt });
+        marked = true;
+      }
+      if (system) { rows.push({ kind: "news", at: m.createdAt, m }); prev = undefined; }
+      else { rows.push({ kind: "msg", at: m.createdAt, m, prev, last: m.id === lastId }); prev = m; }
+    }
+    return rows;
+  }, [visible, news, readMark, identity?.deviceId]);
 
   const quotedFor = useCallback((m: ChatMessage): QuotedMessage | undefined => {
     const id = m.payload.replyTo;
@@ -1035,6 +1282,10 @@ export default function App() {
   }, [visible, deleted, nameFor]);
 
   const typingNames = typing.map(d => active?.members.find(m => m.deviceId === d)?.displayName).filter(Boolean).map(n => firstName(n!));
+  // Two people typing at once used to read "Ann and Bo is typing…", and five of them listed all five.
+  const typingSays = typingNames.length === 1 ? `${typingNames[0]} is typing…`
+    : typingNames.length === 2 ? `${typingNames[0]} and ${typingNames[1]} are typing…`
+    : `${typingNames.length} people are typing…`;
   // "Only for 7 days" stopped being true the moment a room could be kept, and settings is where
   // somebody goes to check what the relay is holding — so name the exceptions rather than
   // flatly contradicting the sheet that says an album keeps things forever.
@@ -1046,8 +1297,8 @@ export default function App() {
   const row = (c: Conversation, rolledUpUnread?: number, nested = false) => {
     const unread = rolledUpUnread ?? c.unread ?? 0;
     const face = c.emoji ?? (c.kind === "group" ? "🏡" : null);
-    return <button key={c.id} className={`conversation ${nested ? "is-channel" : ""} ${c.id === activeId ? "active" : ""}`}
-      onClick={() => setActiveId(c.id)}>
+    return <button key={c.id} className={`conversation ${toneClass(c.color)} ${nested ? "is-channel" : ""} ${c.id === activeId ? "active" : ""}`}
+      onClick={() => openChat(c.id)}>
       {nested ? <span className="channel-face" aria-hidden>{face}</span> : <ConversationAvatar c={c} self={identity!.deviceId}/>}
       <span>
         <strong>{c.kind === "group" && !nested && face ? `${c.title} ${face}` : c.title}</strong>
@@ -1057,7 +1308,11 @@ export default function App() {
       </span>
       <span className="conversation-meta">
         <time>{c.lastMessageAt ? listStamp(c.lastMessageAt) : ""}</time>
-        {unread > 0 && <i className="unread">{unread > 9 ? "9+" : unread}</i>}
+        {unread > 0
+          ? <i className="unread">{unread > 9 ? "9+" : unread}</i>
+          /* Something happened that is not a message — a list ticked, a rename. Worth a dot, not
+             a number: the number is also the badge on the app icon. */
+          : c.nudge && <i className="unread quiet" aria-label="Something happened here"/>}
       </span>
     </button>;
   };
@@ -1079,8 +1334,8 @@ export default function App() {
       <p className="greeting">{greeting()} <b>{firstName(identity.displayName)}</b></p>
       <div className={`conversation-list ${showCards ? "as-cards" : ""}`}>
         {showCards && sorted.map(c => <FamilyCard key={c.id} c={c} self={identity.deviceId} active={c.id === activeId}
-          recent={recent[c.id] ?? []} onOpen={() => setActiveId(c.id)}
-          onInvite={() => { setActiveId(c.id); void startPairing(c); }}/>)}
+          recent={recent[c.id] ?? []} onOpen={() => openChat(c.id)}
+          onInvite={() => { openChat(c.id); void startPairing(c); }}/>)}
         {!showCards && <>
           {tree.spaces.map(node => {
             const expanded = openSpaces[node.space.id] ?? node.channels.some(c => c.id === activeId);
@@ -1106,10 +1361,10 @@ export default function App() {
       <button className="new-chat" onClick={() => setPanel("add")} aria-label="Add">+</button>
     </aside>
 
-    <main className={`chat ${active ? "open" : ""}`}>
+    <main className={`chat ${toneClass(active?.color)} ${active ? "open" : ""}`}>
       {active ? <>
         <header className="chat-head">
-          <button className="back" onClick={() => setActiveId(null)} aria-label="Back">
+          <button className="back" onClick={() => openChat(null)} aria-label="Back">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 4.5 8 12l7.5 7.5"/></svg>
           </button>
           <button className="chat-person" onClick={() => { setConfirming(null); setPanel("members"); }}>
@@ -1117,7 +1372,7 @@ export default function App() {
             <span>
               <strong>{active.kind === "group" ? `${active.title} ${active.emoji ?? "🏡"}` : active.title}</strong>
               <small>{typingNames.length
-                ? `${typingNames.join(" and ")} is typing…`
+                ? typingSays
                 : active.spaceId
                   ? `${conversations.find(c => c.id === active.spaceId)?.title ?? "Channel"} · ${active.members.length}`
                   : active.kind === "group" ? active.members.map(m => firstName(m.displayName)).join(", ") : "Private chat"}</small>
@@ -1126,6 +1381,11 @@ export default function App() {
           {active.kind === "group" && isFullMember(active) &&
             <button className="round" onClick={() => setPanel("invite")} aria-label="Invite">💌</button>}
         </header>
+
+        {openSpace && <ChannelBar space={openSpace.space} channels={openSpace.channels} activeId={activeId}
+          unreadOf={c => ({ count: c.unread ?? 0, nudge: !!c.nudge })}
+          onOpen={openChat}
+          onNew={isFullMember(openSpace.space) ? () => { setNewIn(openSpace.space); setPanel("new"); } : undefined}/>}
 
         <PinnedStrip pins={pinnedMessages} nameFor={nameFor} canEdit={canPost(active)}
           onJump={jumpTo} onUnpin={m => void togglePin(m, true)}/>
@@ -1138,43 +1398,44 @@ export default function App() {
             <button className="primary" onClick={() => setPanel("invite")}>Share a link 🔗</button>
           </div>}
           {threadLoaded && visible.length === 0 && active.members.length > 1 && <div className="hello-card">👋<p>Say hi!</p></div>}
-          {visible.map((m, i) => {
-            const prev = visible[i - 1];
-            const newDay = !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
-            return <Fragment key={m.id}>
-              {newDay && <div className="day"><span>{dayLabel(m.createdAt)}</span></div>}
-              <Bubble m={m} prev={newDay ? undefined : prev} me={identity.deviceId} identity={identity} c={active}
-                reactions={reactions.get(m.id)}
-                reacting={reactFor === m.id}
-                last={i === visible.length - 1}
-                entrance={entering.has(m.id)}
-                deleted={deleted.has(m.id)}
-                quoted={quotedFor(m)}
-                list={lists.get(m.id)}
-                pinned={pins.includes(m.id)}
-                canEdit={canPost(active)}
-                nameFor={nameFor}
-                onReactBar={() => setReactFor(x => x === m.id ? null : m.id)}
-                onReact={(emoji, at) => void react(m, emoji, at)}
-                onOpenMedia={(att, url) => setLightbox({ att, url })}
-                onRetry={() => void retry(m)}
-                onReply={() => { setReactFor(null); setReplyTo(m); composer.current?.focus(); }}
-                onCopy={() => void copyMessage(m)}
-                onDelete={() => void deleteMessageForEveryone(m)}
-                onJump={jumpTo}
-                onPin={() => void togglePin(m, pins.includes(m.id))}
-                onDoodleOn={att => void startDoodleOn(m, att)}
-                onListToggle={(itemId, done) => void tickItem(m.id, itemId, done)}
-                onListAdd={text => void addListItem(m.id, text)}
-                onListRemove={itemId => void removeListItem(m.id, itemId)}/>
-            </Fragment>;
+          {timeline.map((row, i) => {
+            if (row.kind === "day") return <div className="day" key={`day-${row.at}-${i}`}><span>{dayLabel(row.at)}</span></div>;
+            if (row.kind === "mark") return <div className="day unread-mark" key={`mark-${row.at}`}><span>New messages</span></div>;
+            if (row.kind === "news") return <div className="news" key={row.m.id}><span>{newsLine(row.m)}</span></div>;
+            const m = row.m;
+            return <Bubble key={m.id} m={m} prev={row.prev} me={identity.deviceId} identity={identity} c={active}
+              reactions={reactions.get(m.id)}
+              reacting={reactFor === m.id}
+              last={row.last}
+              entrance={entering.has(m.id)}
+              deleted={deleted.has(m.id)}
+              quoted={quotedFor(m)}
+              list={lists.get(m.id)}
+              pinned={pins.includes(m.id)}
+              canEdit={canPost(active)}
+              nameFor={nameFor}
+              onReactBar={() => setReactFor(x => x === m.id ? null : m.id)}
+              onReact={(emoji, at) => void react(m, emoji, at)}
+              onOpenMedia={(att, url) => setLightbox({ att, url })}
+              onRetry={() => void retry(m)}
+              onReply={() => { setReactFor(null); setReplyTo(m); composer.current?.focus(); }}
+              onCopy={() => void copyMessage(m)}
+              onDelete={() => void deleteMessageForEveryone(m)}
+              onJump={jumpTo}
+              onPin={() => void togglePin(m, pins.includes(m.id))}
+              onDoodleOn={att => void startDoodleOn(m, att)}
+              onListToggle={(itemId, done, text) => void tickItem(m.id, itemId, done, text)}
+              onListAdd={text => void addListItem(m.id, text)}
+              onListRemove={(itemId, text) => void removeListItem(m.id, itemId, text)}/>;
           })}
           {typingNames.length > 0 && <div className="typing"><i/><i/><i/></div>}
         </div>
 
         {!canPost(active)
           ? <div className="composer read-only" ref={composerBox}>
-              <p>👀 You’re here to look around. {firstName(active.members.find(m => m.deviceId !== identity.deviceId)?.displayName ?? "Whoever")} shared this with you to see.</p>
+              {active.removedAt
+                ? <p>🚪 You’re no longer in {active.title}. Everything here stays on this device — you’d need a fresh invite to join in again.</p>
+                : <p>👀 You’re here to look around. {firstName(active.members.find(m => m.deviceId !== identity.deviceId)?.displayName ?? "Whoever")} shared this with you to see.</p>}
             </div>
           : <div className="composer" ref={composerBox}>
           {replyTo && !rec && <div className="reply-chip">
@@ -1242,7 +1503,7 @@ export default function App() {
           <span><strong>New channel in {n.space.title}</strong><small>A room of its own inside the group</small></span>
         </button>)}
         {sorted.filter(c => c.kind === "group" && isFullMember(c)).map(c => <button key={c.id} className="member"
-          onClick={() => { setActiveId(c.id); setPanel("invite"); }}>
+          onClick={() => { openChat(c.id); setPanel("invite"); }}>
           <span className="member-emoji">🔗</span><span><strong>Invite to {c.title}</strong><small>Share a link that works whenever they open it</small></span>
         </button>)}
         <button className="member" onClick={() => setPanel("join")}><span className="member-emoji">🎟️</span><span><strong>Join with a code</strong><small>Someone read you a code in person</small></span></button>
@@ -1250,6 +1511,10 @@ export default function App() {
       {panel === "new" && identity && <NewSpace space={newIn}
         onCancel={() => { setPanel("none"); setNewIn(null); }}
         onCreate={(title, emoji, keep) => newIn ? startChannel(newIn, title, emoji, keep) : startGroup(title, emoji, keep)}/>}
+      {panel === "edit" && active && <SpaceEditor conversation={active} isChannel={!!active.spaceId}
+        isHome={homeId === active.id}
+        onCancel={() => setPanel("members")}
+        onSave={next => savePlace(active, next)}/>}
       {panel === "list" && active && <NewList onCancel={() => setPanel("none")} onSend={(t, items) => void sendList(t, items)}/>}
       {panel === "invite" && active && identity && <InvitePanel identity={identity} conversation={active} onFlash={flash}/>}
       {panel === "pair" && <>
@@ -1271,6 +1536,7 @@ export default function App() {
       {panel === "members" && active && (active.kind === "group" ? <>
         <div className="sheet-title">
           <h2>{active.title} {active.emoji ?? "🏡"}</h2>
+          {isFullMember(active) && <button onClick={() => setPanel("edit")} aria-label="Edit this group">✏️</button>}
           {isFullMember(active) && <button onClick={() => setPanel("invite")} aria-label="Invite">💌</button>}
         </div>
         {active.keep && <p className="sheet-sub">🖼️ Everything here is kept until someone deletes it.</p>}

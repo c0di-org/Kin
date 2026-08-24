@@ -2,16 +2,19 @@ import { useState } from "react";
 import Aurora from "./Aurora";
 
 export const ANIMALS = ["🦊", "🐻", "🐰", "🐸", "🦁", "🐼", "🐨", "🦄", "🐯", "🐙", "🦉", "🐢", "🐬", "🦋", "🐞", "🦕"];
+/** The faces a brand new group can wear. The first is the default, and the one nobody has to pick. */
+const GROUP_FACES = ["🏡", "🎒", "🎸", "⚽", "🍜", "🏕️", "🎬", "📚"];
 const FLOATERS = ["🎈", "⭐", "🦋", "🌈", "🎨", "🧸", "🌻", "🪁", "💌", "🍓"];
 
 export default function Onboarding({ pairCode, create, join }: {
   pairCode: string;
-  create(name: string, avatar: string, groupName: string): Promise<void>;
+  create(name: string, avatar: string, groupName: string, groupEmoji: string): Promise<void>;
   join(name: string, avatar: string, code: string): Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [avatar, setAvatar] = useState(() => ANIMALS[Math.floor(Math.random() * ANIMALS.length)]);
   const [groupName, setGroupName] = useState("");
+  const [groupEmoji, setGroupEmoji] = useState(GROUP_FACES[0]);
   const [code, setCode] = useState(pairCode);
   const [joining, setJoining] = useState(!!pairCode);
   const [busy, setBusy] = useState(false);
@@ -20,7 +23,7 @@ export default function Onboarding({ pairCode, create, join }: {
   const go = async (): Promise<void> => {
     if (!ok || busy) return;
     setBusy(true);
-    try { joining ? await join(name, avatar, code) : await create(name, avatar, groupName.trim() || "Family"); }
+    try { joining ? await join(name, avatar, code) : await create(name, avatar, groupName.trim() || "Family", groupEmoji); }
     finally { setBusy(false); }
   };
 
@@ -42,7 +45,15 @@ export default function Onboarding({ pairCode, create, join }: {
       <input autoFocus placeholder="What’s your name?" maxLength={24} value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === "Enter" && void go()} />
       {joining
         ? <input className="code-input" placeholder="Invite code" value={code} onChange={e => setCode(e.target.value.toUpperCase())} onKeyDown={e => e.key === "Enter" && void go()} />
-        : <input placeholder="Name your group — Family, Book club…" maxLength={24} value={groupName} onChange={e => setGroupName(e.target.value)} onKeyDown={e => e.key === "Enter" && void go()} />}
+        : <>
+            <input placeholder="Name your group — Family, Book club…" maxLength={24} value={groupName} onChange={e => setGroupName(e.target.value)} onKeyDown={e => e.key === "Enter" && void go()} />
+            {/* The group everybody uses most was the one group that could never have a face,
+                because this screen never asked for one. */}
+            <div className="face-row">
+              {GROUP_FACES.map(f => <button key={f} className={`animal ${groupEmoji === f ? "picked" : ""}`}
+                onClick={() => setGroupEmoji(f)} aria-label={f}>{f}</button>)}
+            </div>
+          </>}
       <button className="primary" disabled={busy || !ok} onClick={() => void go()}>
         {busy ? "One sec…" : joining ? "Join them 🎉" : "Start our group 🎉"}
       </button>
