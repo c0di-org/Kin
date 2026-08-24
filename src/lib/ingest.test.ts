@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { deletedIds, mergeMessages, openEnvelope, openEnvelopes, previewOf, reconnectDelay, redact, summarize } from "./ingest";
+import { deletedIds, foldLists, mergeMessages, openEnvelope, openEnvelopes, pinnedIds, previewOf, reconnectDelay, redact, summarize } from "./ingest";
 import { encryptPayload, generateIdentity, publicMember, randomKey, signEnvelope } from "./crypto";
-import type { AttachmentPayload, ChatMessage, Conversation, LocalIdentity } from "./types";
+import type { AttachmentPayload, ChatMessage, ChatPayload, Conversation, LocalIdentity } from "./types";
 
 async function fixture() {
   const me = await generateIdentity("Alice");
@@ -21,6 +21,9 @@ async function fixture() {
   };
   return { me, peer, conv, key, sealed };
 }
+
+const msg = (id: string, senderDeviceId: string, createdAt: number, payload: ChatPayload): ChatMessage =>
+  ({ id, conversationId: "room-1", senderDeviceId, createdAt, payload });
 
 describe("openEnvelope", () => {
   it("opens a message from a member of the conversation", async () => {
@@ -248,5 +251,97 @@ describe("opening history as somebody who just arrived", () => {
     const withBo: Conversation = { ...withoutBo, members: [publicMember(ada), publicMember(bo)] };
     const opened = await openEnvelope(withBo, env);
     expect(opened?.message.payload.text).toBe("hello");
+  });
+});
+
+
+describe("pinnedIds", () => {
+  const ev = (id: string, from: string, at: number, targetId: string, value?: string): ChatMessage =>
+    msg(id, from, at, { type: "event", event: { kind: "pin", targetId, value } });
+
+  it("lists what is pinned, oldest pin first", () => {
+    const pins = pinnedIds([
+      msg("a", "dev-1", 1, { type: "text", text: "wifi is hunter2" }),
+      msg("b", "dev-1", 2, { type: "text", text: "school run at 8" }),
+      ev("p2", "dev-2", 20, "b"),
+      ev("p1", "dev-1", 10, "a")
+    ]);
+    expect(pins).toEqual(["a", "b"]);
+  });
+
+  it("lets anybody unpin, not only whoever pinned it", () => {
+    expect(pinnedIds([ev("p", "dev-1", 10, "a"), ev("u", "dev-2", 11, "a", "off")])).toEqual([]);
+  });
+
+  it("settles on the later event when a pin and an unpin race", () => {
+    // Same pair of events, opposite arrival order: both devices have to end up in the same place.
+    const pin = ev("p", "dev-1", 10, "a");
+    const unpin = ev("u", "dev-2", 11, "a", "off");
+    expect(pinnedIds([pin, unpin])).toEqual([]);
+    expect(pinnedIds([unpin, pin])).toEqual([]);
+  });
+
+  it("ignores anything that is not a pin", () => {
+    expect(pinnedIds([msg("r", "dev-1", 1, { type: "event", event: { kind: "reaction", targetId: "a", value: "❤️" } })])).toEqual([]);
+  });
+});
+
+describe("foldLists", () => {
+  const list = msg("list-1", "dev-1", 1, {
+    type: "list",
+    list: { title: "Groceries", items: [{ id: "i1", text: "Milk" }, { id: "i2", text: "Bread" }] }
+  });
+
+  it("starts from the list as it was sent, with nothing ticked", () => {
+    const folded = foldLists([list]).get("list-1")!;
+    expect(folded.title).toBe("Groceries");
+    expect(folded.items).toEqual([
+      { id: "i1", text: "Milk", done: false },
+      { id: "i2", text: "Bread", done: false }
+    ]);
+  });
+
+  it("folds in ticks, additions and removals from everybody", () => {
+    const folded = foldLists([
+      list,
+      msg("e1", "dev-2", 2, { type: "event", event: { kind: "check", targetId: "list-1", value: "i1", done: true } }),
+      msg("e2", "dev-2", 3, { type: "event", event: { kind: "additem", targetId: "list-1", item: { id: "i3", text: "Eggs" } } }),
+      msg("e3", "dev-1", 4, { type: "event", event: { kind: "removeitem", targetId: "list-1", value: "i2" } })
+    ]).get("list-1")!;
+    expect(folded.items).toEqual([
+      { id: "i1", text: "Milk", done: true, by: "dev-2" },
+      { id: "i3", text: "Eggs", done: false }
+    ]);
+  });
+
+  it("asserts state rather than flipping, so two people ticking at once agree", () => {
+    const both = [
+      list,
+      msg("e1", "dev-1", 2, { type: "event", event: { kind: "check", targetId: "list-1", value: "i1", done: true } }),
+      msg("e2", "dev-2", 3, { type: "event", event: { kind: "check", targetId: "list-1", value: "i1", done: true } })
+    ];
+    expect(foldLists(both).get("list-1")!.items[0].done).toBe(true);
+  });
+
+  it("keeps the newest tick when an older one arrives late", () => {
+    const untick = msg("late", "dev-2", 2, { type: "event", event: { kind: "check", targetId: "list-1", value: "i1", done: false } });
+    const tick = msg("fresh", "dev-1", 9, { type: "event", event: { kind: "check", targetId: "list-1", value: "i1", done: true } });
+    expect(foldLists([list, tick, untick]).get("list-1")!.items[0].done).toBe(true);
+  });
+
+  it("applies an event that was stored before the list it names", () => {
+    const tick = msg("e1", "dev-2", 2, { type: "event", event: { kind: "check", targetId: "list-1", value: "i1", done: true } });
+    expect(foldLists([tick, list]).get("list-1")!.items[0].done).toBe(true);
+  });
+
+  it("adds the same line only once, however many copies of the event turn up", () => {
+    const add = (id: string): ChatMessage =>
+      msg(id, "dev-2", 3, { type: "event", event: { kind: "additem", targetId: "list-1", item: { id: "i3", text: "Eggs" } } });
+    expect(foldLists([list, add("e1"), add("e2")]).get("list-1")!.items).toHaveLength(3);
+  });
+
+  it("ignores events naming a list we do not hold", () => {
+    expect(foldLists([list, msg("e", "dev-2", 2, { type: "event", event: { kind: "check", targetId: "gone", value: "i1", done: true } })])
+      .get("list-1")!.items[0].done).toBe(false);
   });
 });

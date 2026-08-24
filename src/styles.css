@@ -459,7 +459,8 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .react-row button:hover { transform: scale(1.4) translateY(-3px); }
 /* Reply, copy and delete live with the reactions because a long press is the one gesture that
    already means "do something to this message" — a second one would need teaching too. */
-.act-row { display: flex; gap: 4px; padding: 2px; border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
+/* Wraps: reply, doodle-back, pin, copy and delete do not all fit on one line over a narrow bubble. */
+.act-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px; border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
 .act-row button {
   flex: 1; min-height: 40px; padding: 0 12px; border-radius: 16px; white-space: nowrap;
   font-size: 14px; font-weight: 800; color: var(--ink); transition: background .16s;
@@ -652,23 +653,27 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .sheet-title { display: flex; align-items: center; justify-content: space-between; }
 .sheet-title h2 { margin-bottom: 10px; }
 .sheet-title button { width: 46px; height: 46px; border-radius: 50%; background: var(--grad-soft); font-size: 21px; border: 1px solid var(--glass-line); }
-.attach-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+/* Five across, on one row: wrapping left "File" sitting alone on a second line, which reads as
+   a category of its own rather than the fifth of five equal things. */
+.attach-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; }
 .attach-grid button {
-  display: grid; place-items: center; gap: 8px; padding: 16px 4px 13px;
+  display: grid; place-items: center; gap: 7px; padding: 13px 3px 11px;
   background: rgba(255, 255, 255, .55); border: 1px solid var(--glass-line);
-  border-radius: 26px; font-weight: 800; font-size: 13.5px; box-shadow: var(--shadow);
+  border-radius: 22px; font-weight: 800; font-size: 12.5px; box-shadow: var(--shadow);
   transition: transform .16s cubic-bezier(.3, 1.5, .5, 1), box-shadow .16s;
 }
 .attach-grid button:hover { transform: translateY(-3px) scale(1.04); box-shadow: var(--shadow-big); }
 .attach-grid button:active { transform: scale(.95); }
 .attach-grid span {
-  font-size: 27px; width: 54px; height: 54px; border-radius: 20px; display: grid; place-items: center;
+  font-size: 25px; width: 100%; max-width: 54px; aspect-ratio: 1; border-radius: 18px;
+  display: grid; place-items: center;
   box-shadow: var(--gloss), 0 6px 14px rgba(60, 55, 130, .14);
 }
 .attach-grid button:nth-child(1) span { background: linear-gradient(140deg, #b9ecff, #7fd7ff); }
 .attach-grid button:nth-child(2) span { background: linear-gradient(140deg, #ffd8ef, #ffa8dc); }
 .attach-grid button:nth-child(3) span { background: linear-gradient(140deg, #fff0b8, #ffd645); }
 .attach-grid button:nth-child(4) span { background: linear-gradient(140deg, #cdf7e6, #7cecc6); }
+.attach-grid button:nth-child(5) span { background: linear-gradient(140deg, #ded9ff, #b3a6ff); }
 .qr { display: block; width: 250px; height: 250px; margin: 10px auto; border-radius: 28px; box-shadow: var(--shadow); background: #fff; padding: 8px; }
 .code { text-align: center; font-size: 38px; font-weight: 1000; letter-spacing: .2em; margin: 12px auto 8px; padding-left: .2em; }
 .sheet > small { display: block; text-align: center; line-height: 1.5; }
@@ -1078,3 +1083,110 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .sheet .onboard-label { margin-top: 10px; }
 .sheet .onboard-label:first-of-type { margin-top: 2px; }
 .choice-row, .pill-row { margin-bottom: 4px; }
+
+/* ---------- pinned ----------
+   A strip under the header rather than a bubble that floats over the thread: it has to be
+   reachable from the top of a long conversation without scrolling, and anything overlaying the
+   messages would sit on top of whatever you were reading. */
+.pinned {
+  flex: none; background: var(--paper-2); border-bottom: 1px solid var(--line);
+  padding: 0 max(8px, var(--safe-right)) 0 max(8px, var(--safe-left));
+  animation: pinned-in .26s cubic-bezier(.25, 1.3, .5, 1);
+}
+@keyframes pinned-in { from { opacity: 0; transform: translateY(-8px); } }
+.pinned-row { display: flex; align-items: center; gap: 4px; }
+.pinned-main {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; text-align: left;
+  padding: 9px 10px; border-radius: 16px; transition: background .16s;
+}
+button.pinned-main:hover { background: rgba(255, 255, 255, .7); }
+.pinned-heading { cursor: default; }
+.pinned-heading em { color: var(--sub); font-weight: 800; }
+.pinned-pin { font-size: 15px; flex: none; }
+.pinned-text { display: grid; gap: 1px; min-width: 0; }
+.pinned-text b { font-size: 11.5px; font-weight: 900; color: var(--accent-ink); text-transform: uppercase; letter-spacing: .06em; }
+.pinned-text em {
+  font-style: normal; font-size: 13.5px; font-weight: 700; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pinned-more, .pinned-off {
+  flex: none; min-width: 38px; height: 34px; padding: 0 10px; border-radius: 999px;
+  font-size: 13px; font-weight: 900; color: var(--sub); transition: background .16s;
+}
+.pinned-more:hover, .pinned-off:hover { background: var(--tint); color: var(--accent-ink); }
+.pinned-list { list-style: none; margin: 0; padding: 0 0 6px; display: grid; gap: 2px; max-height: 40vh; overflow: auto; }
+.pinned-list li { display: flex; align-items: center; gap: 4px; }
+.pinned-list .pinned-main { padding-left: 34px; }
+/* The bubble itself says so too, so following the strip down to a message lands somewhere that
+   explains why you were sent there. */
+.stamp-pin { font-weight: 900; }
+.bubble.pinned-bubble { box-shadow: var(--shadow), var(--gloss), 0 0 0 2px rgba(255, 214, 69, .55); }
+
+/* ---------- shared lists ---------- */
+/* A list needs a readable column and, unlike a photo, cannot be scaled down to get one — so its
+   bubble takes a wider allowance than a line of text, still inside the thread's own padding. */
+.bubble-wrap:has(.list-bubble) { width: min(86%, 420px); }
+.bubble.list-bubble { width: 100%; padding: 7px 7px 23px; }
+.bubble.list-bubble .sender { padding: 4px 8px 2px; }
+.bubble.list-bubble .quote { margin: 2px 4px 6px; width: auto; }
+.list-card {
+  white-space: normal; display: grid; gap: 9px; color: var(--ink);
+  background: var(--paper); border: 1px solid var(--glass-line); border-radius: 21px;
+  padding: 12px 12px 8px; box-shadow: var(--gloss);
+}
+.list-head { display: flex; align-items: baseline; gap: 8px; }
+.list-head strong { font-weight: 900; font-size: 16px; line-height: 1.25; min-width: 0; word-break: break-word; }
+.list-head small { margin-left: auto; flex: none; font-size: 12.5px; font-weight: 800; color: var(--sub); }
+.list-bar { height: 6px; border-radius: 999px; background: rgba(124, 108, 255, .14); overflow: hidden; }
+.list-bar i { display: block; height: 100%; border-radius: 999px; background: var(--grad); transition: width .32s cubic-bezier(.25, 1.2, .5, 1); }
+.list-card.all-done .list-bar i { background: linear-gradient(120deg, #3fe0b0, #45c2ff); }
+.list-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.list-items li { display: flex; align-items: center; gap: 2px; }
+.list-item {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 7px 8px; border-radius: 14px; font-size: 15px; font-weight: 700; line-height: 1.35;
+  transition: background .16s;
+}
+.list-item:hover:not(:disabled) { background: var(--tint); }
+.list-item:disabled { cursor: default; }
+.list-item > span { min-width: 0; word-break: break-word; }
+.list-item em { margin-left: auto; flex: none; font-style: normal; font-size: 11.5px; font-weight: 800; color: var(--sub); }
+.list-box {
+  flex: none; width: 23px; height: 23px; border-radius: 8px; display: grid; place-items: center;
+  border: 2px solid rgba(108, 104, 180, .34); font-size: 14px; color: #fff; font-weight: 900;
+  transition: background .18s, border-color .18s, transform .18s cubic-bezier(.3, 1.6, .5, 1);
+}
+.list-item.ticked .list-box { background: var(--grad); border-color: transparent; transform: scale(1.06); }
+.list-item.ticked > span { text-decoration: line-through; color: var(--sub); }
+.list-drop { flex: none; width: 30px; height: 30px; border-radius: 50%; color: var(--sub); font-size: 13px; opacity: 0; transition: opacity .16s, background .16s; }
+.list-items li:hover .list-drop, .list-drop:focus-visible { opacity: 1; }
+.list-drop:hover { background: rgba(192, 43, 70, .12); color: #c02b46; }
+.list-add { display: flex; align-items: center; gap: 6px; }
+.list-add input {
+  flex: 1; min-width: 0; height: 40px; padding: 0 13px; border-radius: 14px;
+  border: 1px solid var(--glass-line); background: var(--paper-2); outline: none;
+  font-size: 14.5px; font-weight: 700; transition: border-color .18s, background .18s;
+}
+.list-add input:focus { border-color: rgba(124, 108, 255, .55); background: var(--field-focus); }
+.list-add input::placeholder { color: var(--sub); }
+.list-add > button {
+  flex: none; width: 40px; height: 40px; border-radius: 14px; font-size: 19px; font-weight: 900;
+  color: #fff; background: var(--grad); box-shadow: var(--gloss); transition: transform .16s cubic-bezier(.3, 1.5, .5, 1);
+}
+.list-add > button:hover:not(:disabled) { transform: scale(1.08); }
+.list-add > button:disabled { background: rgba(123, 120, 168, .22); color: var(--sub); box-shadow: none; }
+
+/* the sheet that writes one */
+.new-list { display: flex; flex-direction: column; gap: 12px; }
+.new-list .name-input { margin-top: 0; }
+.list-suggests { display: flex; flex-wrap: wrap; gap: 8px; }
+.list-draft { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.list-draft:empty { display: none; }
+.list-draft li {
+  display: flex; align-items: center; gap: 8px; padding: 10px 8px 10px 14px; border-radius: 16px;
+  background: var(--paper-2); border: 1px solid var(--glass-line); font-weight: 700; font-size: 15px;
+  animation: pop-in .22s cubic-bezier(.3, 1.6, .5, 1);
+}
+.list-draft li span { min-width: 0; word-break: break-word; }
+.list-draft li button { margin-left: auto; flex: none; width: 32px; height: 32px; border-radius: 50%; color: var(--sub); font-size: 14px; }
+.list-draft li button:hover { background: rgba(192, 43, 70, .12); color: #c02b46; }

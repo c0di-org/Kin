@@ -4,13 +4,13 @@ import { directConversation, encryptFile, encryptPayload, generateIdentity, publ
 import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, listConversations, listMessages, putConversation, putIdentity, putMessage, undismissDirect } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
 import { addRoomMember, claimPair, completePair, createPair, createRoom, dropEncryptedFile, dropEnvelope, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
-import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, InvitePreview, LocalIdentity, PublicMember } from "./lib/types";
-import { mediaKind, previewLabel, probeImage, rememberLocalFile, saveToDevice } from "./lib/media";
+import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, InvitePreview, ListItem, LocalIdentity, PublicMember } from "./lib/types";
+import { mediaKind, previewLabel, probeImage, rememberLocalFile, resolveAttachment, saveToDevice } from "./lib/media";
 import {
   acceptInvite, canPost, createChannel, createSpace, discoverChannels, isFullMember,
   parseInviteLink, removeChannel, spaceTree
 } from "./lib/spaces";
-import { deletedIds, firstName, mergeMessages, previewOf, redact } from "./lib/ingest";
+import { deletedIds, firstName, foldLists, mergeMessages, pinnedIds, previewOf, redact } from "./lib/ingest";
 import { rememberDeparted } from "./lib/roster";
 import { dayLabel, greeting, listStamp } from "./lib/format";
 import { useConversationSync } from "./hooks/useConversationSync";
@@ -26,11 +26,13 @@ import { ProfileEditor } from "./components/ProfileEditor";
 import { InvitePanel } from "./components/InvitePanel";
 import JoinInvite from "./components/JoinInvite";
 import NewSpace from "./components/NewSpace";
+import NewList from "./components/NewList";
+import { PinnedStrip } from "./components/PinnedStrip";
 import { Bubble, type QuotedMessage } from "./components/Bubble";
 import { Sheet } from "./components/Sheet";
 import { SafetyCheck } from "./components/SafetyCheck";
 
-type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety";
+type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 // One shared empty array, so a thread we have not read yet keeps the same identity across renders
@@ -41,7 +43,7 @@ const PANEL_LABELS: Record<Panel, string> = {
   none: "", doodle: "Doodle", pair: "Add someone in person", invite: "Share a link",
   join: "Join with a code", members: "Chat details", settings: "Settings",
   attach: "Send something", add: "Start something", profile: "Your look",
-  new: "Make a new place", safety: "Safety check"
+  new: "Make a new place", safety: "Safety check", list: "Start a list"
 };
 
 
@@ -72,6 +74,14 @@ export default function App() {
   const [shareIntake, setShareIntake] = useState<{ files: File[]; text: string } | null>(null);
   const [recent, setRecent] = useState<Record<string, ChatMessage[]>>({});
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  /**
+   * The picture the doodle pad is currently opened on top of, if any.
+   *
+   * The url is an object url for a blob already on this device, resolved before the pad opens —
+   * the canvas has to paint it in its first frame, and a pad that started blank and gained the
+   * photo a moment later would let somebody draw underneath it.
+   */
+  const [doodleOn, setDoodleOn] = useState<{ url: string; replyTo: string } | null>(null);
   // Destructive actions confirm in place. A second sheet over the first would have to argue with
   // the first one over focus and inert, for a question that fits on one line.
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -431,7 +441,7 @@ export default function App() {
     await send(active, { type: "text", text, ...(quoting ? { replyTo: quoting.id } : {}) });
   }
 
-  async function sendFile(conv: Conversation, file: File, extra?: { durationMs?: number }): Promise<void> {
+  async function sendFile(conv: Conversation, file: File, extra?: { durationMs?: number; replyTo?: string }): Promise<void> {
     const me = identityRef.current; if (!me) return;
     if (file.size > MAX_FILE) return flash("That’s too big — 25 MB max");
     const mime = file.type || "application/octet-stream";
@@ -448,7 +458,7 @@ export default function App() {
       ...(extra?.durationMs ? { durationMs: extra.durationMs } : {})
     };
     sounds.send(); buzz(8);
-    await send(conv, { type: "file", attachment }, () =>
+    await send(conv, { type: "file", attachment, ...(extra?.replyTo ? { replyTo: extra.replyTo } : {}) }, () =>
       uploadEncryptedFile(me, conv.id, fileId, encrypted.ciphertext, encrypted.sha256));
   }
 
@@ -457,6 +467,9 @@ export default function App() {
    * the caller can leave it sitting there as failed rather than dropping it on the floor.
    */
   async function resend(conv: Conversation, m: ChatMessage): Promise<void> {
+    // Taken back before it ever went out: the row is a tombstone with nothing in it, and sending
+    // it would put an empty bubble in front of everybody.
+    if (m.deletedAt) { await deleteMessage(m.id); setMessages(x => ({ ...x, [conv.id]: (x[conv.id] ?? []).filter(y => y.id !== m.id) })); return; }
     const att = m.payload.type === "file" ? m.payload.attachment : undefined;
     // Look for the bytes before deleting anything: an attachment whose blob has been evicted
     // cannot be re-sent, and losing the row as well would lose the fact that it never arrived.
@@ -464,8 +477,10 @@ export default function App() {
     if (att && !stored) throw new Error("Attachment is no longer on this device");
     await deleteMessage(m.id);
     setMessages(x => ({ ...x, [conv.id]: (x[conv.id] ?? []).filter(y => y.id !== m.id) }));
-    if (att && stored) await sendFile(conv, new File([stored.bytes], stored.name, { type: stored.mime }), { durationMs: att.durationMs });
-    else if (m.payload.type === "text" && m.payload.text) await send(conv, m.payload);
+    if (att && stored) await sendFile(conv, new File([stored.bytes], stored.name, { type: stored.mime }), { durationMs: att.durationMs, replyTo: m.payload.replyTo });
+    // Anything that is not a file goes back out as the payload it already is — a list, a tick, or
+    // a line of text. Reconstructing only text quietly dropped everything else on a retry.
+    else if (m.payload.type !== "file") await send(conv, m.payload);
   }
 
   async function retry(m: ChatMessage): Promise<void> {
@@ -544,6 +559,57 @@ export default function App() {
     emojiBurst(emoji, at?.x, at?.y); sounds.react(); buzz(8);
     if (emoji === "🎉") confetti();
     await send(active, { type: "event", event: { kind: "reaction", targetId: m.id, value: emoji } });
+  }
+
+  /**
+   * Pin or unpin a message for everybody.
+   *
+   * Deliberately not restricted to the sender the way a delete is: a pin does not change what
+   * anybody said, it only says which of the things already said is the one that matters this week,
+   * and in a family the person who needs the wifi password pinned is rarely the one who sent it.
+   */
+  async function togglePin(m: ChatMessage, pinned: boolean): Promise<void> {
+    if (!active) return;
+    setReactFor(null);
+    buzz(10);
+    flash(pinned ? "Unpinned" : "Pinned 📌");
+    await send(active, { type: "event", event: { kind: "pin", targetId: m.id, value: pinned ? "off" : "on" } });
+  }
+
+  /** Open the doodle pad on top of a picture from the thread, replying to it. */
+  async function startDoodleOn(m: ChatMessage, att: AttachmentPayload): Promise<void> {
+    if (!active || !identityRef.current) return;
+    setReactFor(null);
+    const url = await resolveAttachment(identityRef.current, active, att);
+    if (!url) return flash("Couldn’t open that picture to draw on");
+    setDoodleOn({ url, replyTo: m.id });
+    setPanel("doodle");
+  }
+
+  // ---------- shared lists ----------
+  async function sendList(title: string, items: ListItem[]): Promise<void> {
+    if (!active) return;
+    setPanel("none");
+    sounds.send(); buzz(8);
+    await send(active, { type: "list", list: { title, items } });
+  }
+
+  async function tickItem(listId: string, itemId: string, done: boolean): Promise<void> {
+    if (!active) return;
+    buzz(6);
+    if (done) sounds.react();
+    await send(active, { type: "event", event: { kind: "check", targetId: listId, value: itemId, done } });
+  }
+
+  async function addListItem(listId: string, text: string): Promise<void> {
+    if (!active) return;
+    buzz(6);
+    await send(active, { type: "event", event: { kind: "additem", targetId: listId, item: { id: randomId(), text: text.slice(0, 120) } } });
+  }
+
+  async function removeListItem(listId: string, itemId: string): Promise<void> {
+    if (!active) return;
+    await send(active, { type: "event", event: { kind: "removeitem", targetId: listId, value: itemId } });
   }
 
   // ---------- voice notes ----------
@@ -898,7 +964,7 @@ export default function App() {
 
   // ---------- derived ----------
   const sorted = useMemo(() => [...conversations].sort((a, b) => (b.lastMessageAt ?? b.createdAt) - (a.lastMessageAt ?? a.createdAt)), [conversations]);
-  const { visible, reactions, deleted } = useMemo(() => {
+  const { visible, reactions, deleted, pins, lists } = useMemo(() => {
     const sortedMsgs = [...activeMessages].sort((a, b) => a.createdAt - b.createdAt);
     const reactions = new Map<string, Record<string, string[]>>();
     for (const m of sortedMsgs) {
@@ -909,8 +975,16 @@ export default function App() {
       rec[ev.value] = arr.includes(m.senderDeviceId) ? arr.filter(d => d !== m.senderDeviceId) : [...arr, m.senderDeviceId];
       reactions.set(ev.targetId, rec);
     }
-    return { visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions, deleted: deletedIds(sortedMsgs) };
+    return {
+      visible: sortedMsgs.filter(m => m.payload.type !== "event"), reactions,
+      deleted: deletedIds(sortedMsgs), pins: pinnedIds(sortedMsgs), lists: foldLists(sortedMsgs)
+    };
   }, [activeMessages]);
+  // A pin outlives the message only in the pin event; the thing itself can be deleted, or can have
+  // scrolled out of the window we are holding, and the strip should not point at either.
+  const pinnedMessages = useMemo(
+    () => pins.flatMap(id => { const m = visible.find(x => x.id === id); return m && !deleted.has(id) ? [m] : []; }),
+    [pins, visible, deleted]);
   // With one or two chats a list is mostly empty space — show a proper card for each instead.
   // Big friendly cards are for the small flat case — a family and a couple of chats. The moment a
   // space has channels there is a hierarchy to show, and a grid of equal cards is the one shape
@@ -1053,6 +1127,9 @@ export default function App() {
             <button className="round" onClick={() => setPanel("invite")} aria-label="Invite">💌</button>}
         </header>
 
+        <PinnedStrip pins={pinnedMessages} nameFor={nameFor} canEdit={canPost(active)}
+          onJump={jumpTo} onUnpin={m => void togglePin(m, true)}/>
+
         <div className="messages" ref={scroll} onClick={() => setReactFor(null)}>
           {active.kind === "group" && active.members.length === 1 && <div className="invite-card">
             <span className="invite-emoji">{active.emoji ?? "👋"}</span>
@@ -1073,6 +1150,10 @@ export default function App() {
                 entrance={entering.has(m.id)}
                 deleted={deleted.has(m.id)}
                 quoted={quotedFor(m)}
+                list={lists.get(m.id)}
+                pinned={pins.includes(m.id)}
+                canEdit={canPost(active)}
+                nameFor={nameFor}
                 onReactBar={() => setReactFor(x => x === m.id ? null : m.id)}
                 onReact={(emoji, at) => void react(m, emoji, at)}
                 onOpenMedia={(att, url) => setLightbox({ att, url })}
@@ -1080,7 +1161,12 @@ export default function App() {
                 onReply={() => { setReactFor(null); setReplyTo(m); composer.current?.focus(); }}
                 onCopy={() => void copyMessage(m)}
                 onDelete={() => void deleteMessageForEveryone(m)}
-                onJump={jumpTo}/>
+                onJump={jumpTo}
+                onPin={() => void togglePin(m, pins.includes(m.id))}
+                onDoodleOn={att => void startDoodleOn(m, att)}
+                onListToggle={(itemId, done) => void tickItem(m.id, itemId, done)}
+                onListAdd={text => void addListItem(m.id, text)}
+                onListRemove={itemId => void removeListItem(m.id, itemId)}/>
             </Fragment>;
           })}
           {typingNames.length > 0 && <div className="typing"><i/><i/><i/></div>}
@@ -1104,7 +1190,7 @@ export default function App() {
             <button className="send rec-send" onClick={() => rec.stop()} aria-label="Send voice note">↑</button>
           </div> : <>
             <button className="composer-btn" onClick={() => setPanel("attach")} aria-label="Attach">＋</button>
-            <button className="composer-btn" onClick={() => setPanel("doodle")} aria-label="Doodle">🖍️</button>
+            <button className="composer-btn" onClick={() => { setDoodleOn(null); setPanel("doodle"); }} aria-label="Doodle">🖍️</button>
             <textarea ref={composer} rows={1} placeholder={`Message ${active.kind === "direct" ? firstName(active.title) : "everyone"}…`} value={draft}
               onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(130, e.target.scrollHeight)}px`; sync.sendTyping(active.id, !!e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendText(); } }}/>
@@ -1116,10 +1202,13 @@ export default function App() {
       </> : <div className="empty"><Mark/><span>Pick a chat to get cozy</span></div>}
     </main>
 
-    {panel === "doodle" && active && <Doodle onClose={() => setPanel("none")} onSend={blob => {
-      setPanel("none");
-      void sendFile(active, new File([blob], `doodle-${Date.now()}.png`, { type: "image/png" }));
-    }}/>}
+    {panel === "doodle" && active && <Doodle backdrop={doodleOn?.url}
+      onClose={() => { setPanel("none"); setDoodleOn(null); }}
+      onSend={blob => {
+        const on = doodleOn;
+        setPanel("none"); setDoodleOn(null);
+        void sendFile(active, new File([blob], `doodle-${Date.now()}.png`, { type: "image/png" }), on ? { replyTo: on.replyTo } : undefined);
+      }}/>}
 
     {lightbox && <Lightbox att={lightbox.att} url={lightbox.url} onClose={() => setLightbox(null)}/>}
 
@@ -1137,7 +1226,8 @@ export default function App() {
         <div className="attach-grid">
           <button onClick={() => { setPanel("none"); cameraInput.current?.click(); }}><span>📸</span>Camera</button>
           <button onClick={() => { setPanel("none"); mediaInput.current?.click(); }}><span>🖼️</span>Photos</button>
-          <button onClick={() => setPanel("doodle")}><span>🖍️</span>Doodle</button>
+          <button onClick={() => { setDoodleOn(null); setPanel("doodle"); }}><span>🖍️</span>Doodle</button>
+          <button onClick={() => setPanel("list")}><span>✅</span>List</button>
           <button onClick={() => { setPanel("none"); fileInput.current?.click(); }}><span>📎</span>File</button>
         </div>
       </>}
@@ -1160,6 +1250,7 @@ export default function App() {
       {panel === "new" && identity && <NewSpace space={newIn}
         onCancel={() => { setPanel("none"); setNewIn(null); }}
         onCreate={(title, emoji, keep) => newIn ? startChannel(newIn, title, emoji, keep) : startGroup(title, emoji, keep)}/>}
+      {panel === "list" && active && <NewList onCancel={() => setPanel("none")} onSend={(t, items) => void sendList(t, items)}/>}
       {panel === "invite" && active && identity && <InvitePanel identity={identity} conversation={active} onFlash={flash}/>}
       {panel === "pair" && <>
         <h2>Add a family member</h2>

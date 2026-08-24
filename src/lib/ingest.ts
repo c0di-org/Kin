@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatPayload, CipherEnvelope, Conversation, PublicMember } from "./types";
+import type { ChatMessage, ChatPayload, CipherEnvelope, Conversation, ListItem, PublicMember } from "./types";
 import { decryptPayload, verifyEnvelope } from "./crypto";
 import { knownSenders } from "./roster";
 import { previewLabel } from "./media";
@@ -53,6 +53,7 @@ export function mergeMessages(existing: ChatMessage[], incoming: ChatMessage[]):
 
 export function previewOf(payload: ChatPayload): string {
   if (payload.type === "text") return payload.text ?? "";
+  if (payload.type === "list") return `✅ ${payload.list?.title || "List"}`;
   return payload.attachment ? previewLabel(payload.attachment) : "";
 }
 
@@ -73,6 +74,75 @@ export function deletedIds(messages: ChatMessage[]): Set<string> {
     if (senderOf.get(ev.targetId) === m.senderDeviceId) deleted.add(ev.targetId);
   }
   return deleted;
+}
+
+/**
+ * Which messages are pinned, oldest pin first.
+ *
+ * A pin is a claim about the room rather than about the pinner, so unlike a reaction it is not
+ * per-person: the newest pin event for a target is the one that counts, whoever sent it, and an
+ * unpin is the same event carrying `off`. That makes it convergent — two people pinning the same
+ * thing land on pinned, and a pin racing an unpin settles on whichever was sent later — where a
+ * per-sender toggle would leave the strip showing different things on different phones.
+ */
+export function pinnedIds(messages: ChatMessage[]): string[] {
+  const state = new Map<string, { at: number; on: boolean }>();
+  for (const m of messages) {
+    const ev = m.payload.event;
+    if (m.payload.type !== "event" || ev?.kind !== "pin") continue;
+    const prev = state.get(ev.targetId);
+    if (prev && prev.at > m.createdAt) continue;
+    state.set(ev.targetId, { at: m.createdAt, on: ev.value !== "off" });
+  }
+  return [...state]
+    .filter(([, v]) => v.on)
+    .sort((a, b) => a[1].at - b[1].at)
+    .map(([id]) => id);
+}
+
+/** A list line after everything anybody has done to it has been folded in. */
+export type FoldedItem = ListItem & { done: boolean; /** Who last ticked or unticked it. */ by?: string };
+export type FoldedList = { title: string; items: FoldedItem[] };
+
+/**
+ * Every shared list in a thread, with its ticks, additions and removals applied.
+ *
+ * Two passes rather than one: the list itself has to exist before an event can name it, and while
+ * that is true of any thread we actually received in order, a history replay that interleaved two
+ * rooms' clocks would otherwise drop the first tick on the floor. Ticks are last-write-wins on the
+ * asserting event's clock, so a stale tick arriving late cannot undo a fresh one.
+ */
+export function foldLists(messages: ChatMessage[]): Map<string, FoldedList> {
+  const lists = new Map<string, FoldedList>();
+  for (const m of messages) {
+    if (m.payload.type !== "list" || !m.payload.list) continue;
+    lists.set(m.id, {
+      title: m.payload.list.title,
+      items: m.payload.list.items.map(i => ({ ...i, done: false }))
+    });
+  }
+  if (!lists.size) return lists;
+
+  const tickedAt = new Map<string, number>();
+  for (const m of [...messages].sort((a, b) => a.createdAt - b.createdAt)) {
+    const ev = m.payload.event;
+    if (m.payload.type !== "event" || !ev) continue;
+    const list = lists.get(ev.targetId);
+    if (!list) continue;
+    if (ev.kind === "additem" && ev.item?.id && !list.items.some(i => i.id === ev.item!.id)) {
+      list.items = [...list.items, { id: ev.item.id, text: ev.item.text, done: false }];
+    } else if (ev.kind === "removeitem" && ev.value) {
+      list.items = list.items.filter(i => i.id !== ev.value);
+    } else if (ev.kind === "check" && ev.value) {
+      const stamp = `${ev.targetId}:${ev.value}`;
+      if ((tickedAt.get(stamp) ?? -1) > m.createdAt) continue;
+      tickedAt.set(stamp, m.createdAt);
+      list.items = list.items.map(i => i.id === ev.value
+        ? { ...i, done: !!ev.done, by: m.senderDeviceId }
+        : i);
+    }
+  }
+  return lists;
 }
 
 /** A deleted message with its contents actually gone, rather than merely not drawn. */

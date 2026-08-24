@@ -1,10 +1,12 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import type { AttachmentPayload, ChatMessage, Conversation, LocalIdentity } from "../lib/types";
+import type { FoldedList } from "../lib/ingest";
 import { emojiOnly, personColour, time } from "../lib/format";
 import { firstName } from "../lib/ingest";
 import { mediaKind, saveToDevice } from "../lib/media";
 import { buzz } from "../lib/sound";
 import { Avatar } from "./Avatar";
+import { ListCard } from "./ListCard";
 import { FileContent, ImageContent, useAttachmentUrl, VideoContent, VoiceContent } from "./Media";
 
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
@@ -23,15 +25,24 @@ function MediaBody({ att, identity, c, onOpenMedia }: { att: AttachmentPayload; 
 /** What a message is quoting, resolved by the caller since only it holds the whole thread. */
 export type QuotedMessage = { id: string; name: string; preview: string; gone: boolean };
 
-export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, entrance, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump }: {
+export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, entrance, list, pinned, canEdit, nameFor, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump, onPin, onDoodleOn, onListToggle, onListAdd, onListRemove }: {
   m: ChatMessage; prev?: ChatMessage; me: string; identity: LocalIdentity; c: Conversation;
   reactions?: Record<string, string[]>; reacting: boolean; last: boolean; deleted: boolean;
   quoted?: QuotedMessage;
   /** This message turned up while the thread was on screen, so it is worth animating in. */
   entrance?: boolean;
+  /** For a list message, the list with everybody's ticks and additions already folded in. */
+  list?: FoldedList;
+  pinned: boolean;
+  /** False for a viewer, who may look at a list but not tick it, and may not pin. */
+  canEdit: boolean;
+  nameFor(deviceId: string): string;
   onReactBar(): void; onReact(emoji: string, at?: { x: number; y: number }): void;
   onOpenMedia(att: AttachmentPayload, url: string): void; onRetry(): void;
   onReply(): void; onCopy(): void; onDelete(): void; onJump(id: string): void;
+  onPin(): void; onDoodleOn(att: AttachmentPayload): void;
+  onListToggle(itemId: string, done: boolean): void;
+  onListAdd(text: string): void; onListRemove(itemId: string): void;
 }) {
   const mine = m.senderDeviceId === me;
   const sender = c.members.find(x => x.deviceId === m.senderDeviceId);
@@ -45,13 +56,16 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
   useLayoutEffect(() => {
     if (!reacting) return;
     const el = bubble.current;
-    const list = el?.closest(".messages");
-    if (!el || !list) return;
-    setBelow(el.getBoundingClientRect().top - list.getBoundingClientRect().top < 66);
+    const scroller = el?.closest(".messages");
+    if (!el || !scroller) return;
+    setBelow(el.getBoundingClientRect().top - scroller.getBoundingClientRect().top < 66);
   }, [reacting]);
   const chips = Object.entries(reactions ?? {}).filter(([, who]) => who.length > 0);
   const big = !deleted && m.payload.type === "text" && !!m.payload.text && emojiOnly(m.payload.text);
   const isText = m.payload.type === "text" && !!m.payload.text;
+  // A picture can be drawn on top of; a video or a voice note cannot.
+  const drawable = !deleted && m.payload.type === "file" && m.payload.attachment
+    && mediaKind(m.payload.attachment) === "image" ? m.payload.attachment : null;
 
   const startPress = (e: React.PointerEvent): void => {
     if (e.button === 2 || deleted) return;
@@ -68,11 +82,13 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
         </div>
         <div className="act-row">
           <button onClick={onReply}>↩︎ Reply</button>
+          {drawable && canEdit && <button onClick={() => onDoodleOn(drawable)}>🖍️ Doodle back</button>}
+          {canEdit && <button onClick={onPin}>{pinned ? "📌 Unpin" : "📌 Pin"}</button>}
           {isText && <button onClick={onCopy}>📋 Copy</button>}
           {mine && <button className="act-danger" onClick={onDelete}>🗑 Delete</button>}
         </div>
       </div>}
-      <div ref={bubble} className={`bubble ${entrance ? "entering" : ""} ${deleted ? "deleted" : ""} ${big ? "big-emoji" : ""} ${!deleted && m.payload.type === "file" ? "media-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""} ${reacting ? "reacting" : ""}`}
+      <div ref={bubble} className={`bubble ${entrance ? "entering" : ""} ${deleted ? "deleted" : ""} ${big ? "big-emoji" : ""} ${!deleted && m.payload.type === "file" ? "media-bubble" : ""} ${!deleted && m.payload.type === "list" ? "list-bubble" : ""} ${pinned && !deleted ? "pinned-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""} ${reacting ? "reacting" : ""}`}
         onPointerDown={startPress} onPointerUp={endPress} onPointerLeave={endPress} onPointerCancel={endPress}
         onContextMenu={e => { e.preventDefault(); onReactBar(); }}
         onClick={() => { if (m.status === "failed") onRetry(); }}>
@@ -85,8 +101,10 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
           : <>
             {m.payload.type === "text" && <span className="text">{m.payload.text}</span>}
             {m.payload.type === "file" && m.payload.attachment && <MediaBody att={m.payload.attachment} identity={identity} c={c} onOpenMedia={onOpenMedia}/>}
+            {m.payload.type === "list" && list && <ListCard list={list} canEdit={canEdit} nameFor={nameFor}
+              onToggle={onListToggle} onAdd={onListAdd} onRemove={onListRemove}/>}
           </>}
-        <small className="stamp">{time(m.createdAt)}{mine && <b className={`tick ${m.status ?? ""}`}>{m.status === "failed" ? " ⚠ tap to retry" : m.status === "sending" ? " ◌" : m.status === "read" ? " ✓✓" : " ✓"}</b>}</small>
+        <small className="stamp">{pinned && !deleted && <b className="stamp-pin" aria-label="Pinned">📌 </b>}{time(m.createdAt)}{mine && <b className={`tick ${m.status ?? ""}`}>{m.status === "failed" ? " ⚠ tap to retry" : m.status === "sending" ? " ◌" : m.status === "read" ? " ✓✓" : " ✓"}</b>}</small>
       </div>
       {chips.length > 0 && !deleted && <div className={`chips ${mine ? "chips-mine" : ""}`}>
         {chips.map(([emoji, who]) => <button key={emoji} className={who.includes(me) ? "me" : ""} onClick={e => onReact(emoji, { x: e.clientX, y: e.clientY })}>{emoji}{who.length > 1 && <b>{who.length}</b>}</button>)}
