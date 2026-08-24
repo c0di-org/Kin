@@ -76,12 +76,35 @@ export type AttachmentPayload = {
   thumb?: string;
 };
 
+/** One line of a shared list, as the person who wrote it typed it. */
+export type ListItem = { id: string; text: string };
+
+/** A list everybody in the room can tick off: groceries, packing, chores. */
+export type ListPayload = { title: string; items: ListItem[] };
+
 export type ChatPayload = {
-  type: "text" | "file" | "event";
+  type: "text" | "file" | "event" | "list";
   text?: string;
   attachment?: AttachmentPayload;
+  list?: ListPayload;
   replyTo?: string;
-  event?: { kind: "edit" | "delete" | "reaction"; targetId: string; value?: string };
+  event?: {
+    /**
+     * `pin`, `check`, `additem` and `removeitem` are folded at render time exactly the way
+     * reactions and deletions already are: the relay never learns that a list gained a line, and
+     * anybody replaying the room's history arrives at the same list we are looking at.
+     */
+    kind: "edit" | "delete" | "reaction" | "pin" | "check" | "additem" | "removeitem";
+    targetId: string;
+    value?: string;
+    /**
+     * The state being asserted, rather than a flip, so two people ticking the same line at the
+     * same moment agree afterwards instead of cancelling each other out.
+     */
+    done?: boolean;
+    /** The line being added, for `additem`. */
+    item?: ListItem;
+  };
 };
 
 export type CipherEnvelope = {
