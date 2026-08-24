@@ -1,6 +1,7 @@
 import type { ChatMessage, Conversation } from "../lib/types";
 import { firstName, previewOf } from "../lib/ingest";
 import { listStamp } from "../lib/format";
+import { toneClass } from "../lib/tones";
 import { Avatar } from "./Avatar";
 
 /** The family's faces arranged in a ring around a house or envelope badge. */
@@ -14,7 +15,7 @@ function FamilyRing({ c, self }: { c: Conversation; self: string }) {
   // a pair reads better side by side than stacked
   const start = shown.length === 2 ? Math.PI : -Math.PI / 2;
   return <span className={`ring ${solo ? "solo" : ""}`} aria-hidden="true">
-    <b className="ring-core">{c.kind === "group" ? "🏡" : "💌"}</b>
+    <b className="ring-core">{c.kind === "group" ? c.emoji ?? "🏡" : "💌"}</b>
     {shown.map((m, i) => {
       const angle = (i / shown.length) * Math.PI * 2 + start;
       return <i key={m.deviceId} style={{
@@ -36,16 +37,18 @@ export function FamilyCard({ c, self, active, recent, onOpen, onInvite }: {
   const unread = c.unread ?? 0;
   const nameOf = (deviceId: string): string =>
     deviceId === self ? "You" : firstName(c.members.find(m => m.deviceId === deviceId)?.displayName ?? "Someone");
-  return <div className={`family-card ${active ? "active" : ""} ${unread > 0 ? "buzzing" : ""}`}>
+  return <div className={`family-card ${toneClass(c.color)} ${active ? "active" : ""} ${unread > 0 ? "buzzing" : ""}`}>
     <button className="family-open" onClick={onOpen}>
       <FamilyRing c={c} self={self}/>
       <span className="family-head">
-        <strong>{c.kind === "group" ? `${c.title} 🏡` : c.title}</strong>
+        <strong>{c.kind === "group" ? `${c.title} ${c.emoji ?? "🏡"}` : c.title}</strong>
         <small>{alone ? "Just you so far" : c.kind === "group"
           ? `${c.members.length} of you · ${others.map(m => firstName(m.displayName)).join(", ")}`
           : "Private chat"}</small>
       </span>
-      {unread > 0 && <i className="unread">{unread > 9 ? "9+" : unread}</i>}
+      {unread > 0
+        ? <i className="unread">{unread > 9 ? "9+" : unread}</i>
+        : c.nudge && <i className="unread quiet" aria-label="Something happened here"/>}
     </button>
     {recent.length > 0 && <button className="family-recent" onClick={onOpen}>
       {recent.map(m => <span key={m.id} className="family-line">

@@ -280,3 +280,37 @@ describe("removing a member", () => {
     expect((await f.room.fetch(await signedRequest(f.alice, "DELETE", url(`/members/${f.bob.deviceId}`)))).status).toBe(200);
   });
 });
+
+describe("renaming a room", () => {
+  it("moves the plaintext title a push notification is built from", async () => {
+    await f.seed();
+    const res = await f.room.fetch(await signedRequest(f.alice, "PATCH", url(""), { title: "Beach Trip" }));
+    expect(res.status).toBe(200);
+    expect(await f.storage.get("meta")).toMatchObject({ title: "Beach Trip" });
+  });
+
+  it("leaves everything else about the room alone", async () => {
+    await f.seed();
+    await f.storage.put("meta", { ...(await f.storage.get("meta") as object), keep: true, spaceId: "space-1" });
+    await f.room.fetch(await signedRequest(f.alice, "PATCH", url(""), { title: "Album" }));
+    expect(await f.storage.get("meta")).toMatchObject({ title: "Album", keep: true, spaceId: "space-1" });
+  });
+
+  it("refuses a guest, who was let in rather than handed the place", async () => {
+    await f.seed();
+    await f.storage.put(`member:${f.bob.deviceId}`, { ...f.bob.member(), role: "guest" });
+    const res = await f.room.fetch(await signedRequest(f.bob, "PATCH", url(""), { title: "Mine now" }));
+    expect(res.status).toBe(403);
+    expect(await f.storage.get("meta")).toMatchObject({ title: "Family" });
+  });
+
+  it("refuses somebody who is not in the room at all", async () => {
+    await f.seed();
+    expect((await f.room.fetch(await signedRequest(f.mallory, "PATCH", url(""), { title: "Mine now" }))).status).toBe(401);
+  });
+
+  it("refuses an empty name, rather than leaving a room with none", async () => {
+    await f.seed();
+    expect((await f.room.fetch(await signedRequest(f.alice, "PATCH", url(""), { title: "   " }))).status).toBe(400);
+  });
+});

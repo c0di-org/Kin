@@ -58,6 +58,39 @@ export function previewOf(payload: ChatPayload): string {
 }
 
 /**
+ * What a room-level event says on a summary line, or null when it should say nothing.
+ *
+ * Reactions and deletions stay silent, as they always have: they are bookkeeping about a message,
+ * and a heart should not push the thing it was about off the sidebar. A list is different — the
+ * list *is* the conversation in a room that has one, and "Mum: ticked off milk" is the whole point
+ * of having it. Joins, departures and renames speak because the alternative is that a family's
+ * membership changes silently.
+ *
+ * Written from the sender's side ("added…", "left"), since every caller prefixes a name.
+ */
+export function previewOfEvent(payload: ChatPayload): string | null {
+  const ev = payload.event;
+  if (payload.type !== "event" || !ev) return null;
+  const thing = ev.item?.text ? `“${ev.item.text}”` : "something";
+  switch (ev.kind) {
+    case "additem": return `added ${thing} to the list`;
+    case "removeitem": return `took ${thing} off the list`;
+    case "check": return ev.done ? `ticked off ${thing}` : `put ${thing} back on the list`;
+    case "pin": return ev.value === "off" ? null : "pinned a message";
+    case "joined": return "joined 🎉";
+    case "left": return ev.value ? "removed someone" : "left";
+    case "meta": return ev.meta?.title ? `renamed this to “${ev.meta.title}”` : "changed how this looks";
+    default: return null;
+  }
+}
+
+/** Events that belong in the thread as a line of their own, rather than only in the fold. */
+export function isSystemEvent(payload: ChatPayload): boolean {
+  const kind = payload.event?.kind;
+  return payload.type === "event" && (kind === "meta" || kind === "joined" || kind === "left");
+}
+
+/**
  * Which messages have been taken back, folded out of the event stream the same way reactions are.
  *
  * A delete is only honoured from the person who sent the message: the payload is signed, so the
@@ -145,6 +178,35 @@ export function foldLists(messages: ChatMessage[]): Map<string, FoldedList> {
   return lists;
 }
 
+/** What a room has been renamed, refaced and recoloured to, as far as this device has heard. */
+export type FoldedMeta = { title?: string; emoji?: string; color?: string };
+
+/**
+ * Fold every `meta` event in a thread into one answer.
+ *
+ * Field by field rather than event by event: two people who open the editor at the same moment,
+ * one changing the name and one the colour, should both get their way instead of whichever
+ * tapped Save second erasing the other. Within a single field it is last-write-wins on the event
+ * clock, with the message id breaking a tie so every device folds to the same answer.
+ */
+export function foldMeta(messages: ChatMessage[]): FoldedMeta {
+  const at: Record<string, { at: number; id: string }> = {};
+  const out: FoldedMeta = {};
+  for (const m of messages) {
+    const meta = m.payload.event?.meta;
+    if (m.payload.type !== "event" || m.payload.event?.kind !== "meta" || !meta) continue;
+    for (const field of ["title", "emoji", "color"] as const) {
+      const value = meta[field];
+      if (value === undefined) continue;
+      const prev = at[field];
+      if (prev && (prev.at > m.createdAt || (prev.at === m.createdAt && prev.id > m.id))) continue;
+      at[field] = { at: m.createdAt, id: m.id };
+      out[field] = value;
+    }
+  }
+  return out;
+}
+
 /** A deleted message with its contents actually gone, rather than merely not drawn. */
 export function redact(m: ChatMessage): ChatMessage {
   return { ...m, payload: { type: "text" }, deletedAt: m.deletedAt ?? Date.now() };
@@ -153,9 +215,17 @@ export function redact(m: ChatMessage): ChatMessage {
 /**
  * What a batch of newly-opened messages does to a conversation's summary row.
  *
- * Events — edits, reactions, deletions — deliberately never become the preview line or bump the
- * unread count; they are bookkeeping about messages, not messages. Returns null when the batch
- * held nothing worth showing, so callers can skip the write entirely.
+ * Reactions, edits and deletions still say nothing at all. What changed is that a list being
+ * ticked, a message being pinned, somebody arriving or a room being renamed now reach the
+ * summary line — before this, "Mum added milk to the shopping list" nudged nobody, which made a
+ * shared list useless to everyone who was not already looking at it.
+ *
+ * They arrive as a `nudge` rather than as unread *count*, deliberately. The count drives the app
+ * badge and the number on the row, and a family that ticks off twelve things in a supermarket
+ * should not come home to a badge claiming twelve unread messages. A nudge is a dot: something
+ * happened here, and it is not a message.
+ *
+ * Returns null when the batch held nothing worth showing, so callers can skip the write entirely.
  */
 export function summarize(
   conv: Conversation,
@@ -163,18 +233,25 @@ export function summarize(
   context: { myDeviceId: string; activeAndVisible: boolean }
 ): Conversation | null {
   const visible = opened.filter(o => o.message.payload.type !== "event");
-  const last = visible[visible.length - 1];
+  const notable = opened.filter(o => o.message.payload.type !== "event" || previewOfEvent(o.message.payload));
+  const last = notable[notable.length - 1];
   if (!last) return null;
 
-  const missed = context.activeAndVisible ? 0 : visible.filter(o =>
-    o.message.senderDeviceId !== context.myDeviceId && o.message.createdAt > (conv.lastReadAt ?? 0)).length;
+  const fromSomeoneNew = (o: OpenedMessage): boolean =>
+    o.message.senderDeviceId !== context.myDeviceId && o.message.createdAt > (conv.lastReadAt ?? 0);
+  const missed = context.activeAndVisible ? 0 : visible.filter(fromSomeoneNew).length;
+  const nudged = !context.activeAndVisible && notable.some(o => o.message.payload.type === "event" && fromSomeoneNew(o));
   const mine = last.message.senderDeviceId === context.myDeviceId;
+  const unread = (conv.unread ?? 0) + missed;
 
   return {
     ...conv,
     lastMessageAt: Math.max(conv.lastMessageAt ?? 0, last.message.createdAt),
-    unread: (conv.unread ?? 0) + missed,
-    lastPreview: previewOf(last.message.payload),
+    unread,
+    // A dot only means anything while there is no number covering it, and reading the room clears
+    // both — so it is set here and never carried forward once something louder has happened.
+    nudge: nudged && !unread ? true : unread ? false : conv.nudge ?? false,
+    lastPreview: previewOfEvent(last.message.payload) ?? previewOf(last.message.payload),
     lastPreviewSender: mine ? "You" : firstName(last.sender.displayName)
   };
 }

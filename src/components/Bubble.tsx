@@ -41,8 +41,8 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
   onOpenMedia(att: AttachmentPayload, url: string): void; onRetry(): void;
   onReply(): void; onCopy(): void; onDelete(): void; onJump(id: string): void;
   onPin(): void; onDoodleOn(att: AttachmentPayload): void;
-  onListToggle(itemId: string, done: boolean): void;
-  onListAdd(text: string): void; onListRemove(itemId: string): void;
+  onListToggle(itemId: string, done: boolean, text: string): void;
+  onListAdd(text: string): void; onListRemove(itemId: string, text: string): void;
 }) {
   const mine = m.senderDeviceId === me;
   const sender = c.members.find(x => x.deviceId === m.senderDeviceId);

@@ -13,9 +13,10 @@ export function ListCard({ list, canEdit, nameFor, onToggle, onAdd, onRemove }: 
   /** Viewers, and anyone looking at a deleted list, get the list without the pencil. */
   canEdit: boolean;
   nameFor(deviceId: string): string;
-  onToggle(itemId: string, done: boolean): void;
+  /** The text rides along so the summary line can name what was ticked, not just that something was. */
+  onToggle(itemId: string, done: boolean, text: string): void;
   onAdd(text: string): void;
-  onRemove(itemId: string): void;
+  onRemove(itemId: string, text: string): void;
 }) {
   const [adding, setAdding] = useState("");
   const done = list.items.filter(i => i.done).length;
@@ -40,13 +41,13 @@ export function ListCard({ list, canEdit, nameFor, onToggle, onAdd, onRemove }: 
       {list.items.map(item => <li key={item.id}>
         <button className={`list-item ${item.done ? "ticked" : ""}`} disabled={!canEdit}
           aria-pressed={item.done}
-          onClick={() => onToggle(item.id, !item.done)}>
+          onClick={() => onToggle(item.id, !item.done, item.text)}>
           <b className="list-box" aria-hidden="true">{item.done ? "✓" : ""}</b>
           <span>{item.text}</span>
           {item.done && item.by && <em>{nameFor(item.by)}</em>}
         </button>
         {canEdit && <button className="list-drop" aria-label={`Remove ${item.text}`}
-          onClick={() => onRemove(item.id)}>✕</button>}
+          onClick={() => onRemove(item.id, item.text)}>✕</button>}
       </li>)}
     </ul>
     {canEdit && <div className="list-add"

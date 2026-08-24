@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deletedIds, foldLists, mergeMessages, openEnvelope, openEnvelopes, pinnedIds, previewOf, reconnectDelay, redact, summarize } from "./ingest";
+import { deletedIds, foldLists, foldMeta, isSystemEvent, mergeMessages, openEnvelope, openEnvelopes, pinnedIds, previewOf, previewOfEvent, reconnectDelay, redact, summarize } from "./ingest";
 import { encryptPayload, generateIdentity, publicMember, randomKey, signEnvelope } from "./crypto";
 import type { AttachmentPayload, ChatMessage, ChatPayload, Conversation, LocalIdentity } from "./types";
 
@@ -343,5 +343,104 @@ describe("foldLists", () => {
   it("ignores events naming a list we do not hold", () => {
     expect(foldLists([list, msg("e", "dev-2", 2, { type: "event", event: { kind: "check", targetId: "gone", value: "i1", done: true } })])
       .get("list-1")!.items[0].done).toBe(false);
+  });
+});
+
+const metaEvent = (id: string, from: string, at: number, meta: { title?: string; emoji?: string; color?: string }): ChatMessage =>
+  msg(id, from, at, { type: "event", event: { kind: "meta", targetId: "room-1", meta } });
+
+describe("foldMeta", () => {
+  it("takes the newest value of each field", () => {
+    expect(foldMeta([
+      metaEvent("a", "dad", 1000, { title: "Family", emoji: "🏡", color: "candy" }),
+      metaEvent("b", "mum", 2000, { title: "Beach Trip" })
+    ])).toEqual({ title: "Beach Trip", emoji: "🏡", color: "candy" });
+  });
+
+  it("lets two people change different things at once without either one losing", () => {
+    // Same instant, different fields: whichever arrives second must not roll back the first.
+    expect(foldMeta([
+      metaEvent("a", "dad", 5000, { color: "sun" }),
+      metaEvent("b", "mum", 5000, { title: "Beach Trip" })
+    ])).toEqual({ color: "sun", title: "Beach Trip" });
+  });
+
+  it("settles the same way on every device when two edits share a clock", () => {
+    const dad = metaEvent("a", "dad", 5000, { title: "Beach" });
+    const mum = metaEvent("b", "mum", 5000, { title: "Seaside" });
+    expect(foldMeta([dad, mum])).toEqual(foldMeta([mum, dad]));
+    expect(foldMeta([dad, mum]).title).toBe("Seaside"); // the higher id breaks the tie, everywhere
+  });
+
+  it("ignores an edit that arrives late from an older clock", () => {
+    expect(foldMeta([
+      metaEvent("b", "mum", 9000, { title: "Beach Trip" }),
+      metaEvent("a", "dad", 1000, { title: "Family" })
+    ]).title).toBe("Beach Trip");
+  });
+
+  it("has nothing to say about a thread with no edits in it", () => {
+    expect(foldMeta([msg("m", "dad", 1, { type: "text", text: "hi" })])).toEqual({});
+  });
+});
+
+describe("previewOfEvent", () => {
+  it("names the thing that was ticked", () => {
+    const ticked = msg("e", "mum", 1, { type: "event", event: { kind: "check", targetId: "l", value: "i", done: true, item: { id: "i", text: "Milk" } } });
+    expect(previewOfEvent(ticked.payload)).toBe("ticked off “Milk”");
+  });
+
+  it("falls back when an older build sent no text with the tick", () => {
+    const ticked = msg("e", "mum", 1, { type: "event", event: { kind: "check", targetId: "l", value: "i", done: false } });
+    expect(previewOfEvent(ticked.payload)).toBe("put something back on the list");
+  });
+
+  it("stays silent about the things that are nobody's business but the message's", () => {
+    expect(previewOfEvent({ type: "event", event: { kind: "reaction", targetId: "m", value: "❤️" } })).toBeNull();
+    expect(previewOfEvent({ type: "event", event: { kind: "delete", targetId: "m" } })).toBeNull();
+    expect(previewOfEvent({ type: "event", event: { kind: "pin", targetId: "m", value: "off" } })).toBeNull();
+    expect(previewOfEvent({ type: "text", text: "hello" })).toBeNull();
+  });
+
+  it("knows which events belong in the thread as a line of their own", () => {
+    expect(isSystemEvent({ type: "event", event: { kind: "joined", targetId: "room-1" } })).toBe(true);
+    expect(isSystemEvent({ type: "event", event: { kind: "meta", targetId: "room-1", meta: { title: "x" } } })).toBe(true);
+    expect(isSystemEvent({ type: "event", event: { kind: "reaction", targetId: "m", value: "❤️" } })).toBe(false);
+    expect(isSystemEvent({ type: "text", text: "hi" })).toBe(false);
+  });
+});
+
+describe("summarize, on the things that are not messages", () => {
+  const conv: Conversation = { id: "room-1", kind: "group", title: "Family", key: "k", members: [], createdAt: 0, lastReadAt: 100 };
+  const sender = { deviceId: "mum", displayName: "Mum Jones", avatarSeed: "e:🐻", dhPublicJwk: {}, signPublicJwk: {} };
+  const opened = (m: ChatMessage) => [{ message: m, sender }];
+  const ticked = msg("e1", "mum", 500, { type: "event", event: { kind: "check", targetId: "l", value: "i", done: true, item: { id: "i", text: "Milk" } } });
+
+  it("puts a list edit on the summary line as a nudge, not as unread", () => {
+    const next = summarize(conv, opened(ticked), { myDeviceId: "me", activeAndVisible: false });
+    expect(next?.lastPreview).toBe("ticked off “Milk”");
+    expect(next?.lastPreviewSender).toBe("Mum");
+    expect(next?.nudge).toBe(true);
+    expect(next?.unread ?? 0).toBe(0); // the count is also the badge on the app icon
+  });
+
+  it("says nothing at all about a reaction", () => {
+    const heart = msg("e2", "mum", 500, { type: "event", event: { kind: "reaction", targetId: "m", value: "❤️" } });
+    expect(summarize(conv, opened(heart), { myDeviceId: "me", activeAndVisible: false })).toBeNull();
+  });
+
+  it("does not nudge about a room somebody is already looking at", () => {
+    expect(summarize(conv, opened(ticked), { myDeviceId: "me", activeAndVisible: true })?.nudge).toBe(false);
+  });
+
+  it("does not nudge about our own tick", () => {
+    expect(summarize(conv, opened(msg("e3", "me", 500, ticked.payload)), { myDeviceId: "me", activeAndVisible: false })?.nudge).toBe(false);
+  });
+
+  it("drops the dot once there is a number covering it", () => {
+    const said = msg("m1", "mum", 600, { type: "text", text: "on my way" });
+    const next = summarize({ ...conv, nudge: true }, opened(said), { myDeviceId: "me", activeAndVisible: false });
+    expect(next?.unread).toBe(1);
+    expect(next?.nudge).toBe(false);
   });
 });
