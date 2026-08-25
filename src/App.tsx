@@ -30,13 +30,14 @@ import NewList from "./components/NewList";
 import { PinnedStrip } from "./components/PinnedStrip";
 import { Bubble, type QuotedMessage } from "./components/Bubble";
 import { ChannelBar } from "./components/ChannelBar";
+import { ChannelSheet } from "./components/ChannelSheet";
 import { SpaceEditor } from "./components/SpaceEditor";
 import { Gallery, type GalleryTab } from "./components/Gallery";
 import { toneClass } from "./lib/tones";
 import { Sheet } from "./components/Sheet";
 import { SafetyCheck } from "./components/SafetyCheck";
 
-type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit" | "gallery";
+type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit" | "gallery" | "channels";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 // One shared empty array, so a thread we have not read yet keeps the same identity across renders
@@ -48,7 +49,7 @@ const PANEL_LABELS: Record<Panel, string> = {
   join: "Join with a code", members: "Chat details", settings: "Settings",
   attach: "Send something", add: "Start something", profile: "Your look",
   new: "Make a new place", safety: "Safety check", list: "Start a list", edit: "Edit this place",
-  gallery: "Photos and links"
+  gallery: "Photos and links", channels: "Channels"
 };
 
 
@@ -1221,6 +1222,14 @@ export default function App() {
     const node = tree.spaces.find(n => n.space.id === (active.spaceId ?? active.id));
     return node && node.channels.length ? node : null;
   }, [active, tree]);
+  /** What every room of this space but the one you are standing in is owed, for the header. */
+  const elsewhere = useMemo(() => {
+    const rooms = openSpace ? [openSpace.space, ...openSpace.channels].filter(c => c.id !== activeId) : [];
+    return {
+      count: rooms.reduce((n, c) => n + (c.unread ?? 0), 0),
+      nudge: rooms.some(c => c.nudge)
+    };
+  }, [openSpace, activeId]);
   const showCards = sorted.length > 0 && sorted.length <= 3
     && !tree.orphans.length && tree.spaces.every(n => !n.channels.length);
   // Reload on every conversation refresh rather than off a digest: a chat can gain messages without
@@ -1410,14 +1419,24 @@ export default function App() {
                   : active.kind === "group" ? active.members.map(m => firstName(m.displayName)).join(", ") : "Private chat"}</small>
             </span>
           </button>
+          {/* The way into the rest of the space, costing a button rather than a row. It carries
+              what every other room is owed between them, so a glance at the header answers
+              "is anything happening elsewhere" without opening anything. */}
+          {openSpace && <button className="round channels" onClick={() => { setConfirming(null); setPanel("channels"); }}
+            aria-label={`Channels in ${openSpace.space.title}`}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 20V9.2L12 4l8 5.2V20"/><path d="M10 20v-5.5h4V20"/>
+            </svg>
+            {elsewhere.count > 0
+              ? <i className="unread">{elsewhere.count > 9 ? "9+" : elsewhere.count}</i>
+              : elsewhere.nudge && <i className="unread quiet"/>}
+          </button>}
           {active.kind === "group" && isFullMember(active) &&
             <button className="round" onClick={() => setPanel("invite")} aria-label="Invite">💌</button>}
         </header>
 
         {openSpace && <ChannelBar space={openSpace.space} channels={openSpace.channels} activeId={activeId}
-          unreadOf={c => ({ count: c.unread ?? 0, nudge: !!c.nudge })}
-          onOpen={openChat}
-          onNew={isFullMember(openSpace.space) ? () => { setNewIn(openSpace.space); setPanel("new"); } : undefined}/>}
+          onOpen={openChat} onMore={() => { setConfirming(null); setPanel("channels"); }}/>}
 
         <PinnedStrip pins={pinnedMessages} nameFor={nameFor} canEdit={canPost(active)}
           onJump={jumpTo} onUnpin={m => void togglePin(m, true)}/>
@@ -1543,6 +1562,10 @@ export default function App() {
       {panel === "new" && identity && <NewSpace space={newIn}
         onCancel={() => { setPanel("none"); setNewIn(null); }}
         onCreate={(title, emoji, keep) => newIn ? startChannel(newIn, title, emoji, keep) : startGroup(title, emoji, keep)}/>}
+      {panel === "channels" && openSpace && <ChannelSheet space={openSpace.space} channels={openSpace.channels}
+        activeId={activeId}
+        onOpen={id => { setPanel("none"); openChat(id); }}
+        onNew={isFullMember(openSpace.space) ? () => { setNewIn(openSpace.space); setPanel("new"); } : undefined}/>}
       {panel === "gallery" && active && <Gallery identity={identity} conversation={active} deleted={deleted}
         tab={galleryTab} onTab={setGalleryTab} nameFor={nameFor}
         onJump={id => { setPanel("none"); setTimeout(() => jumpTo(id), 60); }}

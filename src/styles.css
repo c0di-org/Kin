@@ -997,10 +997,9 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
   .toast { background: rgba(255, 255, 255, .14); }
   .lightbox-bar .chip-btn { background: rgba(40, 36, 80, .92); color: #f2f0ff; }
   .sheet-title button { border-color: var(--glass-line); }
-  .channel-pill { background: rgba(255, 255, 255, .06); }
   .gallery-tabs button, .link-row, .shot { background: rgba(255, 255, 255, .06); }
   .gallery-tabs i { background: rgba(255, 255, 255, .16); }
-  .news span, .channel-bar { background: rgba(255, 255, 255, .05); }
+  .news span { background: rgba(255, 255, 255, .05); }
   .tone-swatch.picked { border-color: #fff; }
   .tone-sky { --accent-ink: #3c8edf; --tint: rgba(80, 153, 226, 0.18); --grad-soft: linear-gradient(135deg, rgba(88, 186, 228, 0.22), rgba(88, 116, 228, 0.22)); }
   .tone-mint { --accent-ink: #25a766; --tint: rgba(88, 218, 153, 0.18); --grad-soft: linear-gradient(135deg, rgba(96, 220, 183, 0.22), rgba(96, 220, 216, 0.22)); }
@@ -1188,31 +1187,89 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 /* ---------- channels along the top of a conversation ----------
    A space is a place with rooms in it, and you should not have to leave the house to walk down
    its own hallway. Only drawn once a space has channels — a plain family group stays flat. */
+/* ---------- being called into another room ----------
+   This row used to be the whole channel list, permanently. It now appears only when another room
+   in this space has something in it, which is the only time it is worth a phone's vertical space
+   — and because it is rare it can afford to be big: a real tap target carrying the sender and the
+   line, so most of the time you can read it and stay where you are. The map of the space lives in
+   the sheet behind the header's rooms button, where deliberate navigation belongs. */
 .channel-bar {
-  flex: none; display: flex; gap: 6px; align-items: center;
-  padding: 7px max(10px, var(--safe-right)) 7px max(10px, var(--safe-left));
-  overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--line);
-  background: var(--paper-2);
+  flex: none; display: flex; gap: 8px; align-items: center; overflow: hidden;
+  padding: 8px max(10px, var(--safe-right)) 8px max(10px, var(--safe-left));
+  border-bottom: 1px solid var(--line); background: var(--paper-2);
+  animation: rooms-in .32s cubic-bezier(.25, 1.2, .5, 1);
 }
-.channel-bar::-webkit-scrollbar { display: none; }
+/* The height is animated against a stated maximum, since `auto` cannot be interpolated. 80px is a
+   whisker over a real chip, so the overshoot is invisible and nothing is ever clipped once the
+   animation lets go of the property. */
+@keyframes rooms-in {
+  from { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; }
+  to { max-height: 80px; opacity: 1; }
+}
 .channel-pill {
-  flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 13px;
-  border-radius: 999px; font-size: 13.5px; font-weight: 800; color: var(--sub);
-  background: var(--paper); border: 1px solid var(--glass-line);
-  transition: color .16s, background .16s, transform .16s cubic-bezier(.3, 1.5, .5, 1);
+  /* Grows into the row, but stops: a chip the width of a desktop window puts the count an inch
+     from the name it belongs to, and reads as a banner rather than something to tap. */
+  flex: 1; min-width: 0; max-width: 460px; display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 7px 13px 7px 7px; border-radius: 21px;
+  color: var(--ink); background: var(--paper); border: 1px solid var(--glass-line);
+  box-shadow: var(--shadow); transition: transform .16s cubic-bezier(.3, 1.5, .5, 1);
 }
-.channel-pill:hover { color: var(--accent-ink); }
-.channel-pill:active { transform: scale(.95); }
-.channel-pill em { font-style: normal; max-width: 13ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.channel-pill.active { color: #fff; background: var(--grad-mine); border-color: transparent; box-shadow: var(--gloss); }
-.channel-new { font-size: 16px; font-weight: 900; padding: 7px 12px; }
+.channel-pill:active { transform: scale(.97); }
+.pill-face {
+  flex: none; width: 36px; height: 36px; border-radius: 13px; display: grid; place-items: center;
+  font-size: 19px; background: var(--grad-soft); border: 1px solid var(--glass-line);
+}
+.pill-said { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pill-said strong, .pill-said small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill-said strong { font-size: 14px; font-weight: 900; }
+.pill-said small { font-size: 12.5px; }
 .pill-count {
-  flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
-  font-size: 11px; font-weight: 900; font-style: normal; display: grid; place-items: center;
-  color: #fff; background: var(--accent-2);
+  flex: none; min-width: 21px; height: 21px; padding: 0 6px; border-radius: 999px;
+  font-size: 12px; font-weight: 900; font-style: normal; display: grid; place-items: center;
+  color: #fff; background: var(--grad); box-shadow: var(--gloss);
 }
-.channel-pill.active .pill-count { color: var(--accent-ink); background: #fff; }
-.pill-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); }
+.pill-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--accent-2); }
+/* The rooms that did not get the chip, as a count that opens the map — and the way to put the
+   whole row down. Both fixed-width, so the chip takes whatever is left rather than being pushed
+   off the edge by them. */
+.channel-more, .channel-hush {
+  flex: none; height: 34px; border-radius: 999px; display: grid; place-items: center;
+  color: var(--sub); background: var(--paper); border: 1px solid var(--glass-line);
+  transition: color .16s, background .16s;
+}
+.channel-more { min-width: 40px; padding: 0 11px; font-size: 13.5px; font-weight: 900; }
+.channel-hush { width: 34px; }
+.channel-more:hover, .channel-hush:hover { color: var(--ink); background: var(--tint); }
+.channel-hush svg {
+  width: 15px; height: 15px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round;
+}
+
+/* The way into the rest of the space: one button in the header instead of a permanent row. */
+.round.channels { position: relative; color: var(--accent); }
+.round.channels svg {
+  width: 23px; height: 23px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+}
+.round.channels .unread {
+  position: absolute; top: -1px; right: -3px; min-width: 19px; height: 19px; padding: 0 5px;
+  font-size: 11px; border: 2px solid var(--paper);
+}
+.round.channels .unread.quiet { min-width: 12px; width: 12px; height: 12px; top: 2px; right: 2px; }
+
+/* One channel per line, in the sheet — the whole map, for when you meant to go somewhere. */
+.channel-row .unread { margin-left: auto; }
+.channel-row.here { background: var(--tint); }
+.channel-row.here strong { color: var(--accent-ink); }
+.channel-make .member-emoji { font-size: 27px; font-weight: 900; color: var(--accent-ink); }
+
+/* Below the block above and not in the dark section further up the file: these selectors are
+   equally specific, so the last one wins. A chip has to read as raised off the bar, and at night
+   that means lighter than it rather than the daytime arrangement flipped. */
+@media (prefers-color-scheme: dark) {
+  .channel-pill { background: rgba(255, 255, 255, .09); }
+  .channel-more, .channel-hush { background: rgba(255, 255, 255, .09); }
+}
 
 /* ---------- the room talking about itself ----------
    A rename, an arrival, somebody leaving. Centred and quiet: it is the room's own news, not
