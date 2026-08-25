@@ -699,6 +699,21 @@ export default function App() {
     setLightbox({ att, url });
   }
 
+  /**
+   * Put a file from the gallery on the device.
+   *
+   * The bytes may only exist on the relay, so this fetches before it saves — `saveToDevice` reads
+   * the local cache and nothing else, and a Save that silently did nothing for anything older
+   * than this device's history would be worse than no button.
+   */
+  async function saveFromGallery(att: AttachmentPayload): Promise<void> {
+    if (!active || !identityRef.current) return;
+    flash("Fetching it…");
+    if (!(await resolveAttachment(identityRef.current, active, att))) return flash("Couldn’t fetch that one");
+    try { await saveToDevice(att.fileId, att.name); flash("Saved to your device 📎"); }
+    catch { flash("Couldn’t save that one"); }
+  }
+
   /** Open the doodle pad on top of a picture from the thread, replying to it. */
   async function startDoodleOn(m: ChatMessage, att: AttachmentPayload): Promise<void> {
     if (!active || !identityRef.current) return;
@@ -1531,7 +1546,8 @@ export default function App() {
       {panel === "gallery" && active && <Gallery identity={identity} conversation={active} deleted={deleted}
         tab={galleryTab} onTab={setGalleryTab} nameFor={nameFor}
         onJump={id => { setPanel("none"); setTimeout(() => jumpTo(id), 60); }}
-        onOpen={shot => void openFromGallery(shot.att)}/>}
+        onOpen={shot => void openFromGallery(shot.att)}
+        onSave={att => void saveFromGallery(att)}/>}
       {panel === "edit" && active && <SpaceEditor conversation={active} isChannel={!!active.spaceId}
         isHome={homeId === active.id}
         onCancel={() => setPanel("members")}

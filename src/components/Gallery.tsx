@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AttachmentPayload, ChatMessage, Conversation, LocalIdentity } from "../lib/types";
 import { scanMessages } from "../lib/db";
-import { cachedUrl, fmtDuration, isDoodle, mediaKind, resolveAttachment } from "../lib/media";
+import { cachedUrl, fmtDuration, fmtSize, isDoodle, mediaKind, resolveAttachment } from "../lib/media";
 import { extractLinks, linkHost, linkTail, withoutLinks } from "../lib/links";
 import { listStamp, monthLabel } from "../lib/format";
 
-export type GalleryTab = "photos" | "links";
+export type GalleryTab = "photos" | "links" | "files";
 
 type Shot = { m: ChatMessage; att: AttachmentPayload };
 type Link = { url: string; m: ChatMessage; said: string };
@@ -72,7 +72,7 @@ function Tile({ identity, conversation, shot, onOpen }: {
  * fetch, no title lookup, no unfurl. See `lib/links.ts` for why that matters more here than the
  * prettier list it costs us.
  */
-export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, onJump, nameFor }: {
+export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, onSave, onJump, nameFor }: {
   identity: LocalIdentity;
   conversation: Conversation;
   /** Deletions folded out of the open thread, which the stored rows may not carry yet. */
@@ -80,6 +80,8 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
   tab: GalleryTab;
   onTab(tab: GalleryTab): void;
   onOpen(shot: Shot): void;
+  /** Anything that is not a picture: the tap puts it on the device rather than on the screen. */
+  onSave(att: AttachmentPayload): void;
   onJump(messageId: string): void;
   nameFor(deviceId: string): string;
 }) {
@@ -95,9 +97,10 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
     return () => { live = false; };
   }, [conversation.id]);
 
-  const { shots, links } = useMemo(() => {
+  const { shots, links, files } = useMemo(() => {
     const shots: Shot[] = [];
     const links: Link[] = [];
+    const files: Shot[] = [];
     const seen = new Set<string>();
     for (const m of rows ?? []) {
       if (gone(m, deleted)) continue;
@@ -105,6 +108,9 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
       if (att) {
         const kind = mediaKind(att);
         if (kind === "image" || kind === "video") shots.push({ m, att });
+        // A voice note and a PDF are the same problem — sent once, then gone up the thread — so
+        // they share a list rather than each getting a tab nobody would think to look in.
+        else files.push({ m, att });
         continue;
       }
       const text = m.payload.text ?? "";
@@ -116,7 +122,7 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
         links.push({ url, m, said: withoutLinks(text) });
       }
     }
-    return { shots, links };
+    return { shots, links, files };
   }, [rows, deleted]);
 
   // Months, newest first, the way anybody looking for last summer would scroll.
@@ -139,6 +145,8 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
         onClick={() => onTab("photos")}>📷 Photos {rows && <i>{counted(shots.length)}</i>}</button>
       <button role="tab" aria-selected={tab === "links"} className={tab === "links" ? "on" : ""}
         onClick={() => onTab("links")}>🔗 Links {rows && <i>{counted(links.length)}</i>}</button>
+      <button role="tab" aria-selected={tab === "files"} className={tab === "files" ? "on" : ""}
+        onClick={() => onTab("files")}>📎 Files {rows && <i>{counted(files.length)}</i>}</button>
     </div>
 
     {!rows && <div className="hello-card">⏳<p>Having a look…</p></div>}
@@ -166,6 +174,24 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
             </a>
             <button className="link-jump" onClick={() => onJump(m.id)} aria-label="Show in the conversation">↩</button>
           </li>)}
+        </ul>)}
+    {rows && tab === "files" && (files.length === 0
+      ? <div className="hello-card">📎<p>No files or voice notes here yet.</p></div>
+      : <ul className="link-list">
+          {files.map(({ m, att }) => {
+            const voice = mediaKind(att) === "audio";
+            return <li key={m.id}>
+              <button className="link-row" onClick={() => onSave(att)}>
+                <b aria-hidden>{voice ? "🎤" : "📄"}</b>
+                <span>
+                  <strong>{voice ? "Voice note" : att.name}</strong>
+                  <em>{voice && att.durationMs ? fmtDuration(att.durationMs) : fmtSize(att.size)} · tap to save</em>
+                  <small>{nameFor(m.senderDeviceId)} · {listStamp(m.createdAt)}</small>
+                </span>
+              </button>
+              <button className="link-jump" onClick={() => onJump(m.id)} aria-label="Show in the conversation">↩</button>
+            </li>;
+          })}
         </ul>)}
   </>;
 }
