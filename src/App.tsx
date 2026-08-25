@@ -31,11 +31,12 @@ import { PinnedStrip } from "./components/PinnedStrip";
 import { Bubble, type QuotedMessage } from "./components/Bubble";
 import { ChannelBar } from "./components/ChannelBar";
 import { SpaceEditor } from "./components/SpaceEditor";
+import { Gallery, type GalleryTab } from "./components/Gallery";
 import { toneClass } from "./lib/tones";
 import { Sheet } from "./components/Sheet";
 import { SafetyCheck } from "./components/SafetyCheck";
 
-type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit";
+type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit" | "gallery";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 // One shared empty array, so a thread we have not read yet keeps the same identity across renders
@@ -46,7 +47,8 @@ const PANEL_LABELS: Record<Panel, string> = {
   none: "", doodle: "Doodle", pair: "Add someone in person", invite: "Share a link",
   join: "Join with a code", members: "Chat details", settings: "Settings",
   attach: "Send something", add: "Start something", profile: "Your look",
-  new: "Make a new place", safety: "Safety check", list: "Start a list", edit: "Edit this place"
+  new: "Make a new place", safety: "Safety check", list: "Start a list", edit: "Edit this place",
+  gallery: "Photos and links"
 };
 
 
@@ -63,6 +65,7 @@ export default function App() {
    * to draw a line from, which is why this is state of its own rather than read off the row.
    */
   const [readMark, setReadMark] = useState<number | null>(null);
+  const [galleryTab, setGalleryTab] = useState<GalleryTab>("photos");
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [draft, setDraft] = useState("");
   const [panel, setPanel] = useState<Panel>("none");
@@ -680,6 +683,35 @@ export default function App() {
     buzz(10);
     flash(pinned ? "Unpinned" : "Pinned 📌");
     await send(active, { type: "event", event: { kind: "pin", targetId: m.id, value: pinned ? "off" : "on" } });
+  }
+
+  /**
+   * Open something from the gallery full size.
+   *
+   * A tile may be showing the blurred preview that rode inside the payload, and a video tile has
+   * nothing at all — so the bytes are fetched here rather than assumed, and the failure is said
+   * out loud instead of opening an empty lightbox.
+   */
+  async function openFromGallery(att: AttachmentPayload): Promise<void> {
+    if (!active || !identityRef.current) return;
+    const url = await resolveAttachment(identityRef.current, active, att);
+    if (!url) return flash("Couldn’t open that one — it may be off the relay by now");
+    setLightbox({ att, url });
+  }
+
+  /**
+   * Put a file from the gallery on the device.
+   *
+   * The bytes may only exist on the relay, so this fetches before it saves — `saveToDevice` reads
+   * the local cache and nothing else, and a Save that silently did nothing for anything older
+   * than this device's history would be worse than no button.
+   */
+  async function saveFromGallery(att: AttachmentPayload): Promise<void> {
+    if (!active || !identityRef.current) return;
+    flash("Fetching it…");
+    if (!(await resolveAttachment(identityRef.current, active, att))) return flash("Couldn’t fetch that one");
+    try { await saveToDevice(att.fileId, att.name); flash("Saved to your device 📎"); }
+    catch { flash("Couldn’t save that one"); }
   }
 
   /** Open the doodle pad on top of a picture from the thread, replying to it. */
@@ -1511,6 +1543,11 @@ export default function App() {
       {panel === "new" && identity && <NewSpace space={newIn}
         onCancel={() => { setPanel("none"); setNewIn(null); }}
         onCreate={(title, emoji, keep) => newIn ? startChannel(newIn, title, emoji, keep) : startGroup(title, emoji, keep)}/>}
+      {panel === "gallery" && active && <Gallery identity={identity} conversation={active} deleted={deleted}
+        tab={galleryTab} onTab={setGalleryTab} nameFor={nameFor}
+        onJump={id => { setPanel("none"); setTimeout(() => jumpTo(id), 60); }}
+        onOpen={shot => void openFromGallery(shot.att)}
+        onSave={att => void saveFromGallery(att)}/>}
       {panel === "edit" && active && <SpaceEditor conversation={active} isChannel={!!active.spaceId}
         isHome={homeId === active.id}
         onCancel={() => setPanel("members")}
@@ -1563,6 +1600,13 @@ export default function App() {
             </div>}
           </div>;
         })}
+        <button className="setting" onClick={() => { setGalleryTab("photos"); setPanel("gallery"); }}>
+          <span>📷</span>
+          <span className="setting-body">
+            <strong>Photos &amp; links</strong>
+            <small>Everything sent here, without scrolling back through it</small>
+          </span>
+        </button>
         {isFullMember(active) && <button className="setting" onClick={() => void startPairing()}>
           <span>🤝</span>
           <span className="setting-body">
@@ -1600,6 +1644,13 @@ export default function App() {
       </> : <>
         <h2>{active.title}</h2>
         <p className="sheet-sub">Just the two of you · end-to-end encrypted</p>
+        <button className="setting" onClick={() => { setGalleryTab("photos"); setPanel("gallery"); }}>
+          <span>📷</span>
+          <span className="setting-body">
+            <strong>Photos &amp; links</strong>
+            <small>Everything sent here, without scrolling back through it</small>
+          </span>
+        </button>
         <div className="sheet-foot">
           <button className="danger-row" onClick={() => setConfirming(x => x === "leave" ? null : "leave")}>
             <span>🗑</span>Delete this chat

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PERSON_COLOURS, dayLabel, emojiOnly, greeting, initials, listStamp, personColour, personIndex, seedEmoji } from "./format";
+import { PERSON_COLOURS, dayLabel, emojiOnly, greeting, initials, listStamp, monthLabel, personColour, personIndex, seedEmoji } from "./format";
 
 describe("initials", () => {
   it("takes the first letter of the first two words", () => expect(initials("Sam Holland")).toBe("SH"));
@@ -101,5 +101,15 @@ describe("greeting", () => {
     expect(at(5)).toContain("morning");
     expect(at(12)).toContain("afternoon");
     expect(at(18)).toContain("evening");
+  });
+});
+
+describe("monthLabel", () => {
+  const now = new Date(2026, 7, 24);
+  it("names the month on its own within this year", () => {
+    expect(monthLabel(new Date(2026, 5, 2).getTime(), now)).toBe("June");
+  });
+  it("carries the year once it is not this one", () => {
+    expect(monthLabel(new Date(2024, 11, 25).getTime(), now)).toBe("December 2024");
   });
 });

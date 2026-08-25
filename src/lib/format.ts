@@ -84,3 +84,11 @@ export const greeting = (now = new Date()): string => {
   const h = now.getHours();
   return h < 5 ? "Up late? 🌙" : h < 12 ? "Good morning ☀️" : h < 18 ? "Good afternoon 🌤️" : "Good evening 🌙";
 };
+
+/**
+ * The heading a gallery groups a month of photos under. This year needs no year on it.
+ */
+export const monthLabel = (n: number, now = new Date()): string => {
+  const sameYear = new Date(n).getFullYear() === now.getFullYear();
+  return new Intl.DateTimeFormat(undefined, { month: "long", ...(sameYear ? {} : { year: "numeric" }) }).format(n);
+};

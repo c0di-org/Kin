@@ -128,6 +128,32 @@ function conversationRange(conversationId: string, until = Number.MAX_SAFE_INTEG
  * materialising an entire conversation to keep its tail — which on a deep archive read every
  * message ever exchanged just to render one screen.
  */
+/**
+ * Walk a whole conversation, keeping only the rows a caller asks for.
+ *
+ * `listMessages` stops at the most recent few hundred, which is the right answer for opening a
+ * thread and the wrong one for a gallery: the photo somebody wants is usually the one from the
+ * summer, and in a kept room it is a thousand messages back. This is a single pass over the
+ * index that materialises only what matches, so an album of four photos costs four objects
+ * however deep the room is.
+ */
+export async function scanMessages(conversationId: string, keep: (m: ChatMessage) => boolean): Promise<ChatMessage[]> {
+  const conn = await db();
+  const index = conn.transaction("messages", "readonly").objectStore("messages").index("conversation");
+  const req = index.openCursor(conversationRange(conversationId), "prev");
+  const rows: ChatMessage[] = [];
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return resolve(rows);
+      const row = cursor.value as ChatMessage;
+      if (keep(row)) rows.push(row);
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
 export async function listMessages(conversationId: string, limit = 400): Promise<ChatMessage[]> {
   const conn = await db();
   const index = conn.transaction("messages", "readonly").objectStore("messages").index("conversation");
