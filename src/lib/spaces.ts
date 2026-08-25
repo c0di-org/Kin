@@ -315,6 +315,29 @@ export function spaceTree(conversations: Conversation[]): {
   };
 }
 
+/**
+ * Which rooms of a space are asking for you, newest first, and a signature of exactly that.
+ *
+ * The channel row is now an interruption rather than a permanent map, so two questions decide
+ * whether it exists at all: which rooms have something, and whether this is the same something
+ * somebody already put down. The signature answers the second — hushing stores it, and anything
+ * that changes it (a new message, a different room, one of them read on another device) is new
+ * enough to be worth showing again. Storing a timestamp instead would keep the row down through
+ * a genuinely new message that happened to arrive within the window.
+ *
+ * The room you are standing in never calls: whatever it is owed, you are already looking at it.
+ */
+export function callingRooms(
+  space: Conversation,
+  channels: Conversation[],
+  activeId: string | null
+): { rooms: Conversation[]; signature: string } {
+  const rooms = [space, ...channels]
+    .filter(c => c.id !== activeId && ((c.unread ?? 0) > 0 || c.nudge))
+    .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+  return { rooms, signature: rooms.map(c => `${c.id}:${c.unread ?? 0}:${c.nudge ? 1 : 0}`).join(",") };
+}
+
 /** Can this device do the things only a full member may — invite, add channels, rename? */
 export function isFullMember(c: Conversation | null): boolean {
   return !!c && !c.removedAt && (c.role ?? "member") === "member";

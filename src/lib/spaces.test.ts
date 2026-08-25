@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deriveChannelKey, generateIdentity, inviteSecret, openChannelMeta, openInvite, randomKey, sealChannelMeta, sealInvite } from "./crypto";
-import { anonymousProfile, canPost, discoverChannels, inviteCodeFor, inviteLink, isFullMember, parseInviteLink, spaceTree } from "./spaces";
+import { anonymousProfile, callingRooms, canPost, discoverChannels, inviteCodeFor, inviteLink, isFullMember, parseInviteLink, spaceTree } from "./spaces";
 import type { ChannelRecord, LocalIdentity } from "./types";
 import { generateIdentity as makeIdentity } from "./crypto";
 
@@ -261,5 +261,55 @@ describe("discoverChannels", () => {
     ]);
     const { present } = await discoverChannels(me, space, new Map());
     expect([...present].sort()).toEqual(["c1", "c2"]);
+  });
+});
+
+describe("which rooms are calling", () => {
+  const room = (over: Partial<Conversation>): Conversation => ({
+    id: "x", kind: "group", title: "T", key: "k", members: [], createdAt: 0, ...over
+  } as Conversation);
+  const home = room({ id: "home", title: "Home" });
+  const shop = room({ id: "shop", unread: 3, lastMessageAt: 900 });
+  const trip = room({ id: "trip", nudge: true, lastMessageAt: 500 });
+  const quiet = room({ id: "quiet", lastMessageAt: 100 });
+
+  it("keeps only the rooms with something in them, newest first", () => {
+    const { rooms } = callingRooms(home, [quiet, trip, shop], "home");
+    expect(rooms.map(c => c.id)).toEqual(["shop", "trip"]);
+  });
+
+  it("never calls you into the room you are standing in", () => {
+    const { rooms } = callingRooms(home, [shop, trip], "shop");
+    expect(rooms.map(c => c.id)).toEqual(["trip"]);
+  });
+
+  it("counts the space itself as a room, so a channel can be called back to it", () => {
+    const busy = room({ id: "home", title: "Home", unread: 1, lastMessageAt: 999 });
+    const { rooms } = callingRooms(busy, [shop], "shop");
+    expect(rooms.map(c => c.id)).toEqual(["home"]);
+  });
+
+  it("says nothing at all when the rest of the space is quiet", () => {
+    const { rooms, signature } = callingRooms(home, [quiet], "home");
+    expect(rooms).toEqual([]);
+    expect(signature).toBe("");
+  });
+
+  /* The hush stores the signature, so these three cases decide whether a hushed row comes back. */
+  it("keeps the same signature while nothing has changed", () => {
+    expect(callingRooms(home, [shop, trip], "home").signature)
+      .toBe(callingRooms(home, [trip, shop], "home").signature);
+  });
+
+  it("changes the signature when a room gains a message", () => {
+    const before = callingRooms(home, [shop], "home").signature;
+    const after = callingRooms(home, [{ ...shop, unread: 4 }], "home").signature;
+    expect(after).not.toBe(before);
+  });
+
+  it("changes the signature when a hushed room is read somewhere else", () => {
+    const before = callingRooms(home, [shop, trip], "home").signature;
+    const after = callingRooms(home, [{ ...shop, unread: 0 }, trip], "home").signature;
+    expect(after).not.toBe(before);
   });
 });
