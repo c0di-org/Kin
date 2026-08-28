@@ -1,7 +1,24 @@
-import type { ChannelRecord, CipherEnvelope, InvitePreview, InviteRole, InviteSummary, LocalIdentity, PairPackage, PairStatus, PublicMember } from "./types";
-import { sha256, signRequest } from "./crypto";
+import type { ChannelRecord, CipherEnvelope, DeviceLinkStatus, InvitePreview, InviteRole, InviteSummary, LocalIdentity, PairPackage, PairStatus, PublicMember } from "./types";
+import { b64, sha256, signRequest } from "./crypto";
 
 const base = (import.meta.env.VITE_RELAY_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+
+/**
+ * What this running copy of Kin calls its own sockets.
+ *
+ * A device id used to be enough to mean "the screen that sent this", and the relay skipped it
+ * when handing a message round. It stopped being enough the moment one identity could be open on
+ * a phone and a laptop at once: skipping the device skipped the laptop too, and the message it
+ * had just been sent from the phone never arrived. So the socket names itself, the send says
+ * which socket it came from, and only that one is passed over.
+ *
+ * Made on first use rather than at import, so a test that merely reaches for a relay function
+ * does not need an entropy source.
+ */
+let session: string | null = null;
+function sessionId(): string {
+  return (session ??= b64(crypto.getRandomValues(new Uint8Array(8))));
+}
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${base}${path}`, init);
@@ -154,8 +171,43 @@ export async function dropEncryptedFile(identity: LocalIdentity, roomId: string,
 
 export async function sendEnvelope(roomId: string, envelope: CipherEnvelope): Promise<void> {
   await json(`/api/rooms/${encodeURIComponent(roomId)}/messages`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(envelope)
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Kin-Session": sessionId() },
+    body: JSON.stringify(envelope)
   });
+}
+
+// ---------- linking a second device ----------
+
+/**
+ * Leave a sealed identity for another of your own devices to collect.
+ *
+ * Signed, so the relay is storing something for a device that exists rather than for anybody who
+ * can post; sealed, so what it is storing is of no use to it. The secret that opens it is in the
+ * link's fragment and never travels here.
+ */
+export async function createDeviceLink(identity: LocalIdentity, code: string, ticket: {
+  proof: string;
+  iv: string;
+  blob: string;
+  owner: PublicMember;
+}): Promise<{ id: string; expiresAt: number }> {
+  return signedJson(identity, "PUT", `/api/link/${encodeURIComponent(code)}`, ticket);
+}
+
+/** Collect it, on a device that has no identity yet — so the proof stands in for a signature. */
+export async function claimDeviceLink(code: string, proof: string): Promise<{ iv: string; blob: string }> {
+  return json(`/api/link/${encodeURIComponent(code)}/claim`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proof })
+  });
+}
+
+export async function deviceLinkStatus(identity: LocalIdentity, code: string): Promise<DeviceLinkStatus> {
+  return signedJson(identity, "GET", `/api/link/${encodeURIComponent(code)}`);
+}
+
+export async function cancelDeviceLink(identity: LocalIdentity, code: string): Promise<void> {
+  await signedJson(identity, "DELETE", `/api/link/${encodeURIComponent(code)}`);
 }
 
 export async function uploadEncryptedFile(identity: LocalIdentity, roomId: string, fileId: string, ciphertext: Uint8Array<ArrayBuffer>, contentHash: string): Promise<void> {
@@ -192,5 +244,6 @@ export async function websocketUrl(identity: LocalIdentity, roomId: string): Pro
   url.searchParams.set("nonce", auth["X-Kin-Nonce"]);
   url.searchParams.set("body", auth["X-Kin-Body"]);
   url.searchParams.set("sig", auth["X-Kin-Signature"]);
+  url.searchParams.set("session", sessionId());
   return url.toString();
 }

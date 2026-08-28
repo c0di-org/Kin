@@ -2,7 +2,7 @@
 
 Kin encrypts message and attachment contents in the client before they reach Cloudflare. Conversation keys stay on paired devices. The Worker stores and forwards ciphertext; it can still see routing metadata such as room IDs/titles, member display names, public device keys, timestamps, sizes, and push subscriptions.
 
-This v1 protocol uses long-lived P-256 device keys and AES-GCM conversation keys. It provides end-to-end confidentiality and signed message authenticity, but **does not yet provide Signal-style forward secrecy or post-compromise security**.
+One identity may now be open on more than one screen; see **Linked devices** below for what that costs. This v1 protocol uses long-lived P-256 device keys and AES-GCM conversation keys. It provides end-to-end confidentiality and signed message authenticity, but **does not yet provide Signal-style forward secrecy or post-compromise security**.
 
 A conversation can be marked **kept**, which turns off expiry for it entirely: its messages and attachments stay until somebody deletes them, and a kept room is capped at 2 GB and 20,000 messages instead. This is the only way to keep an album readable to somebody who arrives a month later, and it is a deliberate weakening of the promise below — a kept room's ciphertext sits on the relay indefinitely. Rooms are not kept unless you say so when you make one, and the chat details say which kind you are in.
 
@@ -32,6 +32,20 @@ Roles are enforced at the relay, not only in the interface, and on every route t
 - A **viewer** cannot post and cannot upload. The relay refuses their envelopes outright, because it cannot read a payload to tell a message from a reaction; refusing their uploads too is what stops read-only access costing somebody else an album's worth of storage.
 
 Neither role changes what the relay can see, and neither is a substitute for trusting the person.
+
+## Linked devices
+
+Kin's identity is a device: one key pair, one row on every roster, one derived id behind every direct chat. Putting Kin on a second screen therefore moves the identity rather than making a new one — **your laptop holds the same private keys as your phone**, and to every room you are in, the two are one member.
+
+Read that as the trade it is. The honest alternative, where each screen keeps its own keys and is separately revocable, needs either a shared per-person key (which has the same property in a different place) or per-device message fan-out, which is the MLS work named at the end of this file. Until then:
+
+- **A device link is the most valuable thing Kin ever puts on screen.** Whoever opens it becomes you in every chat you are in, and can read everything those rooms hold from then on. Do not send one over a channel you would not send a house key over.
+- **Removing a device is removing you.** A room cannot tell your screens apart, so evicting one evicts all of them. Losing a phone means the family should remove that member and invite the replacement back in — the same as it was before linking existed, and with the same limitation that eviction is not key rotation.
+- A linked screen keeps its own history. Deleting one device's copy of a room does not delete the other's.
+
+The ceremony itself gives the relay nothing. The bundle is sealed under a key derived from a 256-bit secret that lives only in the link's fragment — which browsers do not send to servers — and the object is filed under a hash of that secret, so the relay cannot name it without being told. Collection must present a second, differently-derived hash, so holding the relay's own storage is not holding a way in; five wrong attempts destroy the record. A link is good for one collection inside fifteen minutes, and the device that minted it can watch it land or call it off.
+
+Afterwards, your screens keep each other up to date through a room with exactly one member in it, whose id and key are both derived from your identity's own private key. The relay holds one more room of ciphertext, about a membership it already knew. Every picture in it is signed by your own key and checked before it is believed, so the relay cannot invent a room — or a room key — for your other screen to adopt.
 
 ## Channels
 

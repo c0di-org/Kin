@@ -1,10 +1,11 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { directConversation, encryptFile, encryptPayload, generateIdentity, publicMember, randomId, randomKey, safetyCode, signEnvelope, unwrapConversationKey, wrapConversationKey } from "./lib/crypto";
-import { deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, getSetting, listConversations, listMessages, putConversation, putIdentity, putMessage, putSetting, undismissDirect } from "./lib/db";
+import { clearEverything, deleteConversation, deleteMessage, dismissDirect, dismissedDirects, getBlob, getIdentity, getMessage, getSetting, listConversations, listMessages, putConversation, putIdentity, putMessage, putSetting, undismissDirect } from "./lib/db";
 import { currentPushStatus, isAppleTouchDevice, isStandalone, pushStatusLabel, registerPushForRooms, subscribeWebPush, type PushStatus } from "./lib/push";
 import { addRoomMember, claimPair, completePair, createPair, createRoom, dropEncryptedFile, dropEnvelope, history as roomHistory, joinPair, pairStatus, relayConfig, removeRoomMember, renameRoom, roomMembers, sendEnvelope, uploadEncryptedFile } from "./lib/relay";
-import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, InvitePreview, ListItem, LocalIdentity, PublicMember } from "./lib/types";
+import type { AttachmentPayload, ChatMessage, ChatPayload, CipherEnvelope, Conversation, DeviceLinkBundle, InvitePreview, ListItem, LocalIdentity, PublicMember } from "./lib/types";
+import { applySnapshot, buildSnapshot, parseDeviceLink, publishSnapshot, pullSnapshot, snapshotSignature, worthPublishing } from "./lib/devices";
 import { mediaKind, previewLabel, probeImage, rememberLocalFile, resolveAttachment, saveToDevice } from "./lib/media";
 import {
   acceptInvite, canPost, createChannel, createSpace, discoverChannels, isFullMember,
@@ -25,6 +26,8 @@ import { FamilyCard } from "./components/FamilyCard";
 import { ProfileEditor } from "./components/ProfileEditor";
 import { InvitePanel } from "./components/InvitePanel";
 import JoinInvite from "./components/JoinInvite";
+import LinkDevice from "./components/LinkDevice";
+import DevicesPanel from "./components/DevicesPanel";
 import NewSpace from "./components/NewSpace";
 import NewList from "./components/NewList";
 import { PinnedStrip } from "./components/PinnedStrip";
@@ -37,7 +40,7 @@ import { toneClass } from "./lib/tones";
 import { Sheet } from "./components/Sheet";
 import { SafetyCheck } from "./components/SafetyCheck";
 
-type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit" | "gallery" | "channels";
+type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit" | "gallery" | "channels" | "devices";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 const MAX_FILE = 25 * 1024 * 1024;
 // One shared empty array, so a thread we have not read yet keeps the same identity across renders
@@ -49,7 +52,7 @@ const PANEL_LABELS: Record<Panel, string> = {
   join: "Join with a code", members: "Chat details", settings: "Settings",
   attach: "Send something", add: "Start something", profile: "Your look",
   new: "Make a new place", safety: "Safety check", list: "Start a list", edit: "Edit this place",
-  gallery: "Photos and links", channels: "Channels"
+  gallery: "Photos and links", channels: "Channels", devices: "Your devices"
 };
 
 
@@ -73,6 +76,8 @@ export default function App() {
   const [pair, setPair] = useState<{ code: string; token: string; qr?: string; link?: string; safety?: string } | null>(null);
   const [joinCode, setJoinCode] = useState(new URLSearchParams(location.search).get("pair") ?? "");
   const [inviteLanding, setInviteLanding] = useState(() => parseInviteLink(location.hash));
+  /** A link one of this person's own devices left, waiting to be picked up by this one. */
+  const [linkLanding, setLinkLanding] = useState(() => parseDeviceLink(location.hash));
   const [newIn, setNewIn] = useState<Conversation | null>(null);
   const [safety, setSafety] = useState<{ code: string; title: string } | null>(null);
   const [openSpaces, setOpenSpaces] = useState<Record<string, boolean>>({});
@@ -119,6 +124,13 @@ export default function App() {
   const directCache = useRef(new Map<string, { id: string; key: string }>());
   const probedAt = useRef(new Map<string, number>());
   const sweeping = useRef(false);
+  // The device-sync trio: whether this session has read the other screen's picture yet, what it
+  // last saw or wrote, and a guard so two sweeps do not publish over each other.
+  const pulledDevices = useRef(false);
+  const publishedSnapshot = useRef<string | null>(null);
+  const lastKnownRooms = useRef(0);
+  const syncingDevices = useRef(false);
+  const publishingDevices = useRef(false);
   const flushing = useRef(false);
   const discoverRef = useRef<() => void>(() => {});
   const cameraInput = useRef<HTMLInputElement>(null);
@@ -417,12 +429,163 @@ export default function App() {
   }
   useEffect(() => { discoverRef.current = () => void discoverDirectChats(true); });
 
+  // ---------- this person's other devices ----------
+  /**
+   * Kin on a laptop as well as a phone.
+   *
+   * A linked device is the same member on a second screen — same keys, same row on every roster —
+   * so nothing about a room changes when one appears. What does have to be arranged is the list
+   * of rooms itself: the relay will not enumerate what a device is in, because being able to ask
+   * "which rooms is this device on" is a question about a family that ought to need the family's
+   * own keys to answer. So each screen leaves the other a sealed picture of what it holds, in a
+   * room with one member in it, and reads whatever the other one left.
+   *
+   * Additive, always: a screen that has been shut for a fortnight cannot take away the group its
+   * owner joined on Tuesday by failing to mention it. Leaving is the one thing said out loud.
+   */
+  async function deviceContext(): Promise<{ home: string | null; gone: Record<string, number>; profileAt: number }> {
+    return {
+      home: await getSetting<string>("home"),
+      gone: (await getSetting<Record<string, number>>("leftRooms")) ?? {},
+      profileAt: (await getSetting<number>("profileAt")) ?? 0
+    };
+  }
+
+  /**
+   * Write down that a room was left here, so the other screen lets go of it too.
+   *
+   * Dated, and that is the whole of the rule: absence from a picture never means "gone", because
+   * the two screens are allowed to disagree about what they have yet heard of. Only this says so.
+   */
+  async function noteGone(...ids: string[]): Promise<void> {
+    const gone = (await getSetting<Record<string, number>>("leftRooms")) ?? {};
+    const at = Date.now();
+    await putSetting("leftRooms", { ...gone, ...Object.fromEntries(ids.map(id => [id, at])) });
+  }
+
+  /** Merge two devices' tombstone lists, keeping the later of any two claims about a room. */
+  function mergeGone(a: Record<string, number>, b: Record<string, number>): Record<string, number> {
+    const out = { ...a };
+    for (const [id, at] of Object.entries(b)) out[id] = Math.max(out[id] ?? 0, at);
+    // Ninety days after a room was left, nothing anywhere still holds a copy to be told about.
+    const floor = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    return Object.fromEntries(Object.entries(out).filter(([, at]) => at > floor));
+  }
+
+  async function pullDevices(): Promise<boolean> {
+    const me = identityRef.current;
+    if (!me || !navigator.onLine) return false;
+    const { reached, snapshot } = await pullSnapshot(me);
+    if (!reached) return false;
+    pulledDevices.current = true;
+    if (!snapshot) return true;
+    lastKnownRooms.current = Math.max(lastKnownRooms.current, snapshot.rooms.length);
+
+    const local = await listConversations();
+    const context = await deviceContext();
+    const { add, remove, profile, home } = applySnapshot(me, local, snapshot, context);
+    for (const conv of add) await putConversation(conv);
+    for (const id of remove) {
+      await deleteConversation(id);
+      setMessages(x => { const { [id]: _gone, ...rest } = x; return rest; });
+      if (activeIdRef.current === id) { openChat(null); setPanel("none"); }
+    }
+    if (profile) {
+      const next: LocalIdentity = { ...me, displayName: profile.displayName, avatarSeed: profile.avatarSeed };
+      await putIdentity(next);
+      await putSetting("profileAt", profile.at);
+      identityRef.current = next;
+      setIdentity(next);
+    }
+    if (home) { await putSetting("home", home); setHomeId(home); }
+    const gone = mergeGone(context.gone, snapshot.gone ?? {});
+    await putSetting("leftRooms", gone);
+    // What we have just read is what is on the relay, so there is nothing to write back over it —
+    // unless this device holds something the picture did not, which the next comparison catches.
+    publishedSnapshot.current = snapshotSignature({ ...snapshot, gone });
+    if (add.length || remove.length) {
+      await refresh();
+      if (add.length) {
+        sounds.receive();
+        flash(add.length === 1 ? `${add[0].title} came over from your other device` : `${add.length} chats came over from your other device`);
+      }
+    }
+    return true;
+  }
+
+  async function pushDevices(): Promise<void> {
+    const me = identityRef.current;
+    // The sweep and the debounce below both reach for this, and a room made while a sweep is
+    // running would otherwise put two pictures up at once for the prune to sort out afterwards.
+    if (!me || !navigator.onLine || publishingDevices.current) return;
+    publishingDevices.current = true;
+    try { await publishDevices(me); } finally { publishingDevices.current = false; }
+  }
+
+  async function publishDevices(me: LocalIdentity): Promise<void> {
+    // Never write before reading. A screen that has only just been linked holds nothing, and
+    // publishing that would take every room off every other screen until they noticed and put
+    // them back — which is a bad half-minute for something nobody asked for.
+    if (!pulledDevices.current && !(await pullDevices())) return;
+    const snapshot = buildSnapshot(me, await listConversations(), await deviceContext());
+    const signature = snapshotSignature(snapshot);
+    if (signature === publishedSnapshot.current) return;
+    if (!worthPublishing(snapshot, lastKnownRooms.current)) return;
+    try {
+      await publishSnapshot(me, snapshot);
+      publishedSnapshot.current = signature;
+      lastKnownRooms.current = Math.max(lastKnownRooms.current, snapshot.rooms.length);
+    } catch { /* the next sweep tries again */ }
+  }
+
+  async function syncDevices(): Promise<void> {
+    if (syncingDevices.current) return;
+    syncingDevices.current = true;
+    try { if (await pullDevices()) await pushDevices(); }
+    finally { syncingDevices.current = false; }
+  }
+
+  /**
+   * Become the identity another of this person's screens sealed up for us.
+   *
+   * Everything already here goes first, and it has to: those rooms belong to a different set of
+   * keys, which are on none of their rosters and can decrypt none of their messages. Keeping them
+   * would furnish the sidebar with places that no longer answer.
+   */
+  async function adoptIdentity(bundle: DeviceLinkBundle): Promise<void> {
+    await clearEverything();
+    await putIdentity(bundle.identity);
+    if (bundle.home) await putSetting("home", bundle.home);
+    identityRef.current = bundle.identity;
+    pulledDevices.current = false;
+    publishedSnapshot.current = null;
+    directCache.current.clear();
+    probedAt.current.clear();
+    setMessages({});
+    setIdentity(bundle.identity);
+    setHomeId(bundle.home);
+    clearLinkLanding();
+    await pullDevices();
+    const cs = await listConversations();
+    setConversations(cs);
+    openChat(landingConversation(cs, bundle.home));
+    confetti(); sounds.tada();
+    flash("This device is yours now 🎉");
+  }
+
+  function clearLinkLanding(): void {
+    setLinkLanding(null);
+    dropLaunchQuery();
+  }
+
+
   useEffect(() => {
     if (!ready || !identity) return;
     const sweep = (force: boolean) => {
       if (document.visibilityState !== "visible") return;
       void discoverDirectChats(force);
       void sweepChannels();
+      void syncDevices();
       void flushFailed();
     };
     sweep(true);
@@ -431,6 +594,22 @@ export default function App() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, [ready, identity?.deviceId, conversationIds, online]);
+
+  /**
+   * Anything that changes which rooms this person is in, or what they are called, is news for
+   * their other screen — so it goes out as soon as it settles rather than waiting for the sweep.
+   *
+   * Keyed on a signature of the rooms rather than on the list itself: the list is rewritten on
+   * every arriving message, and a debounce that reset on each of those would never fire in a busy
+   * family. Nothing is sent if the picture has not actually changed.
+   */
+  const roomsSignature = conversations
+    .map(c => [c.id, c.title, c.emoji ?? "", c.color ?? "", c.role ?? "", c.spaceId ?? ""].join("|")).sort().join(",");
+  useEffect(() => {
+    if (!ready || !identity || !online) return;
+    const timer = setTimeout(() => { void pushDevices(); }, 1500);
+    return () => clearTimeout(timer);
+  }, [ready, online, identity?.deviceId, identity?.displayName, identity?.avatarSeed, roomsSignature]);
 
   // ---------- open conversation ----------
   useEffect(() => {
@@ -793,6 +972,9 @@ export default function App() {
     const me = identityRef.current; if (!me) return;
     const next: LocalIdentity = { ...me, displayName: name.trim().slice(0, 32) || me.displayName, avatarSeed: `e:${avatar}` };
     await putIdentity(next);
+    // Stamped, because a name belongs to the person rather than to the screen they changed it on:
+    // the other one adopts it, and the stamp is what stops the two of them arguing about it.
+    await putSetting("profileAt", Date.now());
     setIdentity(next);
     const mine = publicMember(next);
     const convs = await listConversations();
@@ -887,6 +1069,7 @@ export default function App() {
     // it back on the next sweep, and tell the user it had gone from everybody's.
     try { await removeChannel(me, space, channel.id); }
     catch { return flash("Couldn’t remove that channel — are you online?"); }
+    await noteGone(channel.id);
     await forgetChannel(channel.id);
     openChat(space.id); setPanel("none"); setConfirming(null);
     await refresh();
@@ -1094,14 +1277,17 @@ export default function App() {
         // A space's channels are rooms of their own, and leaving only the space left every one of
         // them on this device: still connected, still pushing, and unreachable from a sidebar that
         // had nothing left to file them under.
-        for (const channel of (await listConversations()).filter(c => c.spaceId === conv.id)) {
+        const channels = (await listConversations()).filter(c => c.spaceId === conv.id);
+        for (const channel of channels) {
           try { await removeRoomMember(me, channel.id, me.deviceId); } catch { /* it goes locally regardless */ }
           await deleteConversation(channel.id);
           setMessages(x => { const { [channel.id]: _gone, ...rest } = x; return rest; });
         }
+        await noteGone(conv.id, ...channels.map(c => c.id));
       } else {
         // Otherwise the sweep below re-derives this room within thirty seconds and pulls it back.
         await dismissDirect(conv.id);
+        await noteGone(conv.id);
       }
       await deleteConversation(conv.id);
       setMessages(x => { const { [conv.id]: _gone, ...rest } = x; return rest; });
@@ -1362,6 +1548,10 @@ export default function App() {
   // An invite link is answered before onboarding: somebody who has never opened Kin should be
   // shown what they were invited to, not asked to start a family they were not invited to start.
   if (inviteLanding) return <JoinInvite code={inviteLanding.code} onAccept={takeInvite} onCancel={clearInviteLanding}/>;
+  // And a device link before either: it is somebody's own second screen being handed the keys,
+  // and asking them to make an identity first would be asking them to make the wrong one.
+  if (linkLanding) return <LinkDevice code={linkLanding.code} secret={linkLanding.secret}
+    replacing={!!identity} onAdopt={adoptIdentity} onCancel={clearLinkLanding}/>;
   if (!identity) return <Onboarding pairCode={joinCode} create={createFamily} join={(n, a, c) => joinFamily(n, a, c)}/>;
 
   return <div className={`app ${online ? "" : "is-offline"}`}>
@@ -1691,6 +1881,8 @@ export default function App() {
         <SafetyCheck code={safety.code} title={safety.title}/>
         <button className="primary" onClick={() => { setSafety(null); setPanel("none"); }}>They match 👍</button>
       </>}
+      {panel === "devices" && <DevicesPanel identity={identity} home={homeId} onFlash={flash}
+        onDone={() => setPanel("settings")}/>}
       {panel === "profile" && <ProfileEditor identity={identity} onCancel={() => setPanel("settings")} onSave={(n, a) => void saveProfile(n, a)}/>}
       {panel === "settings" && <>
         <button className="profile" onClick={() => setPanel("profile")}>
@@ -1702,6 +1894,13 @@ export default function App() {
         {installPrompt && <button className="setting" onClick={() => void installPrompt.prompt()}><span>📲</span>Install Kin on this device</button>}
         {showIosInstall && <div className="hint"><strong>📲 Install Kin</strong><small>Tap Share, then Add to Home Screen. Open the icon to get notifications.</small></div>}
         <button className="setting" onClick={() => void enableNotifications()}><span>🔔</span>Notifications<b>{pushStatusLabel(pushStatus)}</b></button>
+        <button className="setting" onClick={() => setPanel("devices")}>
+          <span>💻</span>
+          <span className="setting-body">
+            <strong>Your devices</strong>
+            <small>Use Kin on your laptop as well as your phone</small>
+          </span>
+        </button>
         <button className="setting" onClick={() => setPanel("join")}><span>🔗</span>Join with a code</button>
         <small className="privacy">
           🔒 End-to-end encrypted · the relay only holds scrambled messages, and only for 7 days

@@ -225,3 +225,66 @@ export type InviteSummary = {
   maxUses: number | null;
   revoked?: boolean;
 };
+
+/** How a link this device minted is getting on, as the relay sees it. */
+export type DeviceLinkStatus = { claimed: boolean; expiresAt: number };
+
+/**
+ * What travels to a second device of the same person, sealed under the link secret.
+ *
+ * Only the identity, deliberately. The rooms follow separately over the sync room — which is the
+ * same path they take every day afterwards, so a device that has just linked and a device that
+ * has been linked for a month are on exactly one code path rather than two.
+ */
+export type DeviceLinkBundle = {
+  v: 1;
+  identity: LocalIdentity;
+  /** So the second screen opens into the same place the first one does, before anything is set up. */
+  home: string | null;
+  at: number;
+};
+
+/** One room, as a person's own devices describe it to each other. */
+export type SnapshotRoom = {
+  id: string;
+  kind: "group" | "direct";
+  title: string;
+  key: string;
+  createdAt: number;
+  emoji?: string;
+  spaceId?: string;
+  color?: string;
+  keep?: boolean;
+  role?: MemberRole;
+  metaAt?: number;
+  profile?: { displayName: string; avatarSeed: string };
+  /**
+   * The other person, for a direct chat only.
+   *
+   * A group's roster is pulled from the relay the moment the room connects, so carrying it here
+   * would be duplicating something already on its way. A direct chat has no roster to pull — it
+   * is two device keys and a derivation — so its peer has to travel.
+   */
+  peer?: PublicMember;
+};
+
+/**
+ * One device's picture of what this person is in, for their other devices to read.
+ *
+ * A full list rather than a diff, because a device that has been off for a fortnight has no diff
+ * to catch up on — and because two devices both writing full pictures converge, where two
+ * devices both writing diffs need to agree about order.
+ *
+ * `gone` is the exception, and it is why leaving works: absence from `rooms` cannot mean
+ * "removed", or a device that had joined something its sibling has not heard about yet would
+ * lose it. A room is only dropped when it is named here, with the moment it was left — so a room
+ * left on Tuesday and rejoined on Friday stays.
+ */
+export type DeviceSnapshot = {
+  v: 1;
+  at: number;
+  profile: { displayName: string; avatarSeed: string; at: number };
+  home: string | null;
+  rooms: SnapshotRoom[];
+  gone: Record<string, number>;
+};

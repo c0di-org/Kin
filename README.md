@@ -15,6 +15,7 @@ A tiny, private messenger for the people you actually know — a family, a trip,
 - Roles: a **guest** can read and post but cannot invite anyone else, add anyone directly, or remove anyone; a **viewer** can look but neither post nor upload. All of it is refused at the relay rather than trusted to the client hiding a button.
 - Somebody arriving on a link can pick a name for that room alone, or go in without one and be Guest Otter.
 - **Kept rooms**: a group or channel can be told to hold its messages and photos until somebody deletes them, instead of clearing itself after a week. That is what makes an album an album. Deleting a message takes its ciphertext and attachment off the relay too, so a full album can be given its space back.
+- **Kin on more than one screen.** Settings → Your devices shows a QR and a link that carries this identity, sealed, to a laptop or a second phone. The other screen becomes the *same* member — same keys, one row on every roster — so the family still sees one of you. Rooms made, renamed or left on either screen reach the other within half a minute, and a message typed on one appears live on the other.
 - Pairing by short code or QR is still there for adding someone stood next to you, ending on a safety check both phones work out for themselves from the keys they received.
 - Client-side encrypted text and encrypted file attachments.
 - Inline media: photos and videos render in the chat (with tiny encrypted blurred previews), voice notes get a player, everything else a file card. Decrypted media is cached locally in IndexedDB so it outlives the 7-day relay window.
@@ -32,6 +33,12 @@ A tiny, private messenger for the people you actually know — a family, a trip,
 A **space** is a group with nothing above it. A **channel** is a group that names a space, and its key is derived with HKDF from the space key and the channel id — so any member of a space can compute the key of any channel in it without anybody rewrapping or redistributing anything. Creating a channel is a room on the relay plus a line in the space's channel directory, which the space's Durable Object holds durably (and encrypted, so the relay cannot read channel names). The directory is durable on purpose: it is how somebody who joins in month two arrives at the same set of channels as everyone else, long after a "channel created" message would have expired.
 
 Because channel keys fall out of the space key, **channels partition attention, not access**. Anything needing a narrower audience than the space is a separate group.
+
+A **linked device** is not a second member — it is the same member on a second screen, holding the same keys. Making a laptop its own member would double every roster, split every direct chat (whose room id is derived from the two device ids) in two, and leave a family working out which "Dad" they were talking to; the alternative that avoids sharing any key at all is per-device message fan-out, which is the MLS milestone below rather than a weekend's work. So the identity travels, and the cost is stated plainly in the UI and in `SECURITY.md`: the private keys exist in two places, and removing one screen from a room removes all of them.
+
+Getting it there is a **DeviceLink** object: the same shape as an invite, over a 256-bit secret that only ever exists in a URL fragment and a QR code. The relay holds ciphertext filed under a hash of that secret and checks a proof at collection, so knowing where the bundle is stored is not knowing how to open it. It is good for one collection inside fifteen minutes, and the minting device can watch it land or call it off.
+
+Staying in step afterwards is a **sync room**: an ordinary room with one member in it, whose id and key are both derived from the identity's own private key, so nobody who has not got that key can name it — let alone read it. Each screen leaves a sealed picture of which rooms it holds, and reads whatever the other left. This adds nothing to what the relay knows: it already knows which rooms a device is on the roster of. The merge is additive — a laptop shut for a fortnight cannot take away the group its owner joined on Tuesday by having an older list — and leaving is the one thing said out loud, as a dated tombstone. Messages do not travel this way: the newly linked screen pulls the relay's own seven days (or everything, in a kept room) from each room as it connects, and older history stays on the device that has it.
 
 An **invite** is its own Durable Object holding a conversation key sealed under a secret it never sees, plus a hash of that secret it checks at redemption. Redeeming calls into the room object over RPC to enrol the new member; joining a channel calls into the space object to ask whether the caller is one of theirs.
 
@@ -51,7 +58,7 @@ npm run dev:relay
 npm run dev
 ```
 
-With both running, `node scripts/smoke-invite.mjs` walks the whole invite ceremony over HTTP — group, channel, link, redemption, roles and what each one is refused, revocation, deletion from a kept room — against the local relay. The unit tests drive the Durable Objects as plain classes, so this is what covers the routes, the cross-object RPC and the real request signing agreeing with one another.
+With both running, `node scripts/smoke-devices.mjs` walks the whole two-device ceremony over HTTP — a phone makes a group, seals its identity into a link, a laptop that has never touched the relay opens it and finds the room list waiting, then makes a group of its own and watches it come back the other way. `node scripts/smoke-invite.mjs` walks the whole invite ceremony over HTTP — group, channel, link, redemption, roles and what each one is refused, revocation, deletion from a kept room — against the local relay. The unit tests drive the Durable Objects as plain classes, so this is what covers the routes, the cross-object RPC and the real request signing agreeing with one another.
 
 The Vite app runs on `http://localhost:1420` and proxies API/WebSocket traffic to Wrangler on `http://127.0.0.1:8787`.
 
@@ -97,7 +104,7 @@ On iPhone/iPad, Web Push only works after Kin is a Home Screen app:
 3. Open Kin from the icon (not the Safari tab).
 4. **••• → Notifications**.
 
-The app registers the same push subscription on every conversation, so a DM still notifies even if you last had the family chat open. Push TTL matches the 7-day relay window.
+The app registers the same push subscription on every conversation, so a DM still notifies even if you last had the family chat open. Push TTL matches the 7-day relay window. Each room keeps one subscription **per endpoint** rather than per device, so a phone and a linked laptop both get notified — and neither is notified about what the other just sent.
 
 ## Native later
 
@@ -111,4 +118,4 @@ The upstream template has additional Android inset/scaffold tooling that should 
 
 ## Suggested next security milestone
 
-Before treating Kin as a high-risk secure messenger, replace the static conversation-key protocol with audited Signal/MLS-style ratcheting, add device revocation/key rotation, and security-review the pairing ceremony. The UI/backend boundary is designed so that upgrade can happen without changing the family experience.
+Before treating Kin as a high-risk secure messenger, replace the static conversation-key protocol with audited Signal/MLS-style ratcheting, add device revocation/key rotation, and security-review the pairing and device-link ceremonies. Per-device keys — so that a laptop is its own member and can be revoked without revoking the phone — fall out of that work rather than preceding it. The UI/backend boundary is designed so that upgrade can happen without changing the family experience.
