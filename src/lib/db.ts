@@ -237,6 +237,22 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   return committed(tx);
 }
 
+/**
+ * Forget everything on this device and start again as somebody else.
+ *
+ * Only ever reached by adopting an identity from another of your own screens. The rooms held here
+ * belonged to the identity being replaced: the new keys are on none of their rosters and can
+ * decrypt none of their messages, so leaving them behind would furnish the sidebar with a list of
+ * places that no longer answer.
+ */
+export async function clearEverything(): Promise<void> {
+  const conn = await db();
+  const stores = ["meta", "conversations", "messages", "blobs"];
+  const tx = conn.transaction(stores, "readwrite");
+  for (const store of stores) tx.objectStore(store).clear();
+  return committed(tx);
+}
+
 export async function deleteMessage(id: string): Promise<void> {
   return write("messages", s => { s.delete(id); });
 }

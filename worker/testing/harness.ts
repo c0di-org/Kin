@@ -88,12 +88,16 @@ async function drain(body: ReadableStream | ArrayBuffer | Uint8Array | null): Pr
  * from `getWebSockets()` once it is closed. A fake that merely records the call will happily go on
  * delivering to it, and then agree that eviction works when it does not.
  */
-export function fakeSocket(deviceId: string, pool: unknown[]) {
+export function fakeSocket(deviceId: string, pool: unknown[], session?: string) {
   const ws = {
     deviceId,
+    session,
     sent: [] as string[],
     closed: false,
-    deserializeAttachment: () => ({ deviceId }),
+    // A device may now have more than one of these — a phone and a laptop on the same identity —
+    // and the session is how the room tells the socket that sent a message from the one that
+    // wants to be told about it.
+    deserializeAttachment: () => (session ? { deviceId, session } : { deviceId }),
     serializeAttachment: () => {},
     send(text: string) {
       if (ws.closed) throw new Error("socket is closed");

@@ -66,7 +66,12 @@ async function importConversationKey(key: string, usage: KeyUsage[]): Promise<Cr
   return crypto.subtle.importKey("raw", unb64(key), { name: "AES-GCM" }, false, usage);
 }
 
-export async function encryptPayload(conversationId: string, key: string, senderDeviceId: string, payload: ChatPayload): Promise<CipherEnvelope> {
+/**
+ * Seal a payload into an envelope. Generic in what it seals — a chat message ordinarily, and a
+ * device's picture of which rooms it is in when one of a person's own devices is telling another.
+ * Both travel the same way for the same reason: the relay routes them and cannot read either.
+ */
+export async function encryptPayload<T = ChatPayload>(conversationId: string, key: string, senderDeviceId: string, payload: T): Promise<CipherEnvelope> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const createdAt = Date.now();
   const id = crypto.randomUUID();
@@ -86,11 +91,11 @@ export async function encryptPayload(conversationId: string, key: string, sender
   };
 }
 
-export async function decryptPayload(envelope: CipherEnvelope, key: string): Promise<ChatPayload> {
+export async function decryptPayload<T = ChatPayload>(envelope: CipherEnvelope, key: string): Promise<T> {
   const aes = await importConversationKey(key, ["decrypt"]);
   const aad = enc.encode(`${envelope.conversationId}:${envelope.id}:${envelope.senderDeviceId}:${envelope.createdAt}`);
   const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(envelope.iv), additionalData: aad }, aes, unb64(envelope.ciphertext));
-  return JSON.parse(dec.decode(clear)) as ChatPayload;
+  return JSON.parse(dec.decode(clear)) as T;
 }
 
 function envelopeText(envelope: Omit<CipherEnvelope, "signature"> | CipherEnvelope): string {
@@ -210,6 +215,67 @@ export async function openInvite(code: string, secret: string, wrappedKey: strin
   const { proof, key } = await inviteMaterial(code, secret);
   const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, key, unb64(wrappedKey));
   return { proof, roomKey: b64(clear) };
+}
+
+/**
+ * The room a person's own devices keep for each other.
+ *
+ * A device only knows the groups whose rows it holds: the relay will not enumerate them, because
+ * being able to ask "what rooms is this device in" is a question about a family that the relay
+ * should not be answering on demand. So a second screen cannot simply be told to look around —
+ * something has to hand it the list, and go on handing it the list as the list changes.
+ *
+ * That something is an ordinary Kin room with exactly one member in it. Both the id and the key
+ * come out of the identity's own private key, so nobody who has not got that key can name the
+ * room, let alone read it — and the relay ends up holding one more room of ciphertext, about a
+ * membership it already knew.
+ */
+export async function selfRoom(identity: LocalIdentity): Promise<{ id: string; key: string }> {
+  const seed = identity.dhPrivateJwk.d;
+  if (!seed) throw new Error("This identity has no private key");
+  const key = await deriveAesFrom(unb64(seed), "self-sync");
+  return { id: (await sha256(`kin-self-room:${seed}`)).slice(0, 32), key: b64(await crypto.subtle.exportKey("raw", key)) };
+}
+
+/**
+ * The two values a device-link secret produces, mirroring `inviteMaterial` exactly.
+ *
+ * The reasoning is the same and the stakes are higher: `proof` is what the relay checks and
+ * cannot invert, so knowing where the bundle is stored is not knowing how to collect it, and
+ * `key` never leaves the browser, so what the relay holds is an identity it cannot open.
+ */
+async function linkMaterial(code: string, secret: string): Promise<{ proof: string; key: CryptoKey }> {
+  return {
+    proof: await sha256(`kin-link-proof:${code}:${secret}`),
+    key: await deriveAesFrom(unb64(secret), `link:${code}`, false)
+  };
+}
+
+/** 256 bits, because what this opens is the whole identity rather than one room. */
+export function linkSecret(): string {
+  return b64(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+export async function linkCodeFor(secret: string): Promise<string> {
+  return (await sha256(`kin-link-code:${secret}`)).slice(0, 16);
+}
+
+/** The half of a link secret the relay is allowed to hold, for a device that only needs to ask. */
+export async function linkProof(code: string, secret: string): Promise<string> {
+  return (await linkMaterial(code, secret)).proof;
+}
+
+export async function sealLink<T>(code: string, secret: string, value: T): Promise<{ proof: string; blob: string; iv: string }> {
+  const { proof, key } = await linkMaterial(code, secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const blob = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(value)));
+  return { proof, blob: b64(blob), iv: b64(iv) };
+}
+
+export async function openLink<T>(code: string, secret: string, blob: string, iv: string): Promise<{ proof: string; value: T }> {
+  const { proof, key } = await linkMaterial(code, secret);
+  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, key, unb64(blob));
+  return { proof, value: JSON.parse(dec.decode(clear)) as T };
 }
 
 /**

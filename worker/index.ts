@@ -24,6 +24,8 @@ type Envelope = {
   signature: string;
 };
 
+/** A push endpoint, with when it was last registered — which is what decides the one to let go. */
+type PushRecord = PushSubscriptionJSON & { at?: number };
 /** `bytes` and `by` are what a later deletion needs: how much to give back, and whose it was. */
 type FileRecord = { fileId: string; key: string; expiresAt: number; bytes?: number; by?: string };
 type RoomMeta = {
@@ -61,6 +63,23 @@ type InviteRecord = {
   uses: number;
   revoked?: boolean;
 };
+/**
+ * A sealed identity waiting for the device it belongs to. `blob` is ciphertext the relay cannot
+ * open, and `proof` is the hash it checks instead of being able to.
+ */
+type DeviceLinkRecord = {
+  id: string;
+  proof: string;
+  /** Who minted it, and the key they signed with — so only that device can look in on it or kill it. */
+  owner: string;
+  ownerKey: JsonWebKey;
+  iv: string;
+  blob: string;
+  createdAt: number;
+  expiresAt: number;
+  claimedAt?: number;
+  misses: number;
+};
 type PairRecord = { code: string; creator: Member; creatorToken: string; group: { id: string; title: string }; joiner?: Member; joinerToken?: string; complete?: boolean };
 /**
  * What the inviter leaves for the joiner to collect.
@@ -76,6 +95,7 @@ type Env = {
   ROOMS: DurableObjectNamespace<ConversationRoom>;
   PAIRS: DurableObjectNamespace<PairingSession>;
   INVITES: DurableObjectNamespace<InviteTicket>;
+  LINKS: DurableObjectNamespace<DeviceLink>;
   ATTACHMENTS: R2Bucket;
   ASSETS: Fetcher;
   VAPID_PUBLIC_KEY?: string;
@@ -90,6 +110,24 @@ const PAIR_TTL = 10 * 60 * 1000;
 const MAX_FILE = 25 * 1024 * 1024;
 const INVITE_MAX_TTL = 30 * 24 * 60 * 60 * 1000;
 const MAX_CHANNELS = 64;
+/**
+ * A device link is one person walking across the room with a phone in their hand, so it is
+ * measured in minutes rather than days — and it carries the one payload on the whole relay that
+ * would matter if it leaked, so it is one-shot on top of that.
+ */
+const LINK_TTL = 15 * 60 * 1000;
+const LINK_MAX_BLOB = 96 * 1024;
+/** How long a claimed bundle stays collectable, so a dropped response is a retry and not a redo. */
+const LINK_CLAIMED_GRACE = 60_000;
+/**
+ * Push endpoints one device may hold at once.
+ *
+ * One identity is now allowed more than one browser — a phone and a laptop share a device id, and
+ * each has its own push endpoint — so the subscription can no longer be a single row per device.
+ * The cap is what stops a browser that mints a fresh endpoint on every reinstall from
+ * accumulating dead ones forever.
+ */
+const MAX_PUSH_PER_DEVICE = 8;
 /**
  * What a kept room may hold. Ordinary rooms are self-limiting — everything in them expires after
  * a week — so these caps exist only for rooms that have opted out of that, where without them one
@@ -258,6 +296,13 @@ export default {
       return env.INVITES.get(env.INVITES.idFromName(inviteMatch[1])).fetch(request);
     }
 
+    // A device link is filed under a hash of the secret that opens it, exactly like an invite —
+    // so the client names its own object, and the relay is handed a value it cannot walk back.
+    const linkMatch = url.pathname.match(/^\/api\/link\/([A-Za-z0-9_-]{8,64})(?:\/claim)?$/);
+    if (linkMatch) {
+      return env.LINKS.get(env.LINKS.idFromName(linkMatch[1])).fetch(request);
+    }
+
     const roomMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)(\/.*)?$/);
     if (roomMatch) {
       const roomId = decodeURIComponent(roomMatch[1]);
@@ -273,6 +318,120 @@ export default {
     return response;
   }
 };
+
+/**
+ * One person's second device, being handed the keys to the first.
+ *
+ * Kin's identity has always been a device: one key pair, one row on every roster, one derived id
+ * behind every direct chat. Making a laptop a *second* member of everything would double every
+ * roster, split every private chat in two, and ask a family to work out which "Dad" is the one
+ * they are talking to. So a linked device is not a new member — it is the same member, on a
+ * second screen, and this object is the ceremony that gets it there.
+ *
+ * What travels is the identity itself, which makes this the one payload on the relay worth
+ * stealing. Three things stand between it and anybody else, and none of them is the relay's good
+ * behaviour: the bundle is sealed under a key derived from a 256-bit secret that only ever
+ * exists in a URL fragment; the object is filed under a hash of that secret, so the relay cannot
+ * even name it without being told; and redemption has to present `proof`, so holding the relay's
+ * own storage is not holding a way in.
+ *
+ * It is one-shot and it dies in fifteen minutes. Both of those matter more here than for an
+ * invite: an invite that leaks costs a room, and this one costs everything.
+ */
+export class DeviceLink extends DurableObject<Env> {
+  private async record(): Promise<DeviceLinkRecord | undefined> {
+    return this.ctx.storage.get<DeviceLinkRecord>("record");
+  }
+
+  /** Replay guard, mirroring the invite object's: a nonce is good exactly once. */
+  private async claimNonce(deviceId: string, nonce: string, signedAt: number): Promise<boolean> {
+    const key = `nonce:${deviceId}:${nonce}`;
+    if (await this.ctx.storage.get(key)) return false;
+    await this.ctx.storage.put(key, signedAt + MAX_SKEW);
+    return true;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const match = url.pathname.match(/^\/api\/link\/([A-Za-z0-9_-]{8,64})(\/claim)?$/);
+    if (!match) return error("Bad link path", 404);
+    const linkId = match[1];
+    const claiming = !!match[2];
+    const now = Date.now();
+    const record = await this.record();
+
+    if (!claiming && request.method === "PUT") {
+      if (record) return error("Link exists", 409);
+      const bodyText = await request.text();
+      let body: { owner?: Member; proof?: string; iv?: string; blob?: string };
+      try { body = JSON.parse(bodyText); } catch { return error("Invalid body"); }
+      if (!body?.owner?.deviceId || !body.proof || !body.iv || !body.blob) return error("Invalid link");
+      if (body.blob.length > LINK_MAX_BLOB) return error("That is more than a link can carry", 413);
+      // Signed as the card in the body, the same claim invite creation makes: what is provable
+      // here is that a real device with these keys asked for this. Nothing else in the object
+      // depends on who that is — the secret decides who may open it.
+      if (!(await verifySignedBy(request, await sha256b64(enc.encode(bodyText)), body.owner, (d, n, t) => this.claimNonce(d, n, t)))) {
+        return error("Unauthorized", 401);
+      }
+      const next: DeviceLinkRecord = {
+        id: linkId,
+        proof: String(body.proof),
+        owner: body.owner.deviceId,
+        ownerKey: body.owner.signPublicJwk,
+        iv: String(body.iv).slice(0, 64),
+        blob: String(body.blob),
+        createdAt: now,
+        expiresAt: now + LINK_TTL,
+        misses: 0
+      };
+      await this.ctx.storage.put("record", next);
+      await this.ctx.storage.setAlarm(next.expiresAt);
+      return json({ id: linkId, expiresAt: next.expiresAt }, 201);
+    }
+
+    if (!record || record.id !== linkId || record.expiresAt <= now) return error("This link has expired", 404);
+
+    if (claiming && request.method === "POST") {
+      let body: { proof?: string };
+      try { body = await request.json(); } catch { return error("Invalid body"); }
+      // The object is already named by a hash of the secret, so getting this far means knowing it.
+      // The counter is for the case where that reasoning is wrong, and costs one line.
+      if (body?.proof !== record.proof) {
+        const misses = record.misses + 1;
+        if (misses >= 5) await this.ctx.storage.deleteAll();
+        else await this.ctx.storage.put("record", { ...record, misses });
+        return error("This link is not valid", 403);
+      }
+      // Collected once. The grace window is for the reply that never arrived — a laptop on hotel
+      // wifi asking again is the ordinary case, and making it start over is worse than a minute.
+      if (record.claimedAt && now - record.claimedAt > LINK_CLAIMED_GRACE) return error("This link has already been used", 410);
+      if (!record.claimedAt) {
+        await this.ctx.storage.put("record", { ...record, claimedAt: now });
+        await this.ctx.storage.setAlarm(Math.min(record.expiresAt, now + LINK_CLAIMED_GRACE));
+      }
+      return json({ iv: record.iv, blob: record.blob });
+    }
+
+    // Both of these are the minting device looking in on its own link, so both are signed by it.
+    if (!claiming && (request.method === "GET" || request.method === "DELETE")) {
+      const bodyHash = await sha256b64(enc.encode(""));
+      const owner: Member = { deviceId: record.owner, displayName: "", avatarSeed: "", dhPublicJwk: record.ownerKey, signPublicJwk: record.ownerKey };
+      if (!(await verifySignedBy(request, bodyHash, owner, (d, n, t) => this.claimNonce(d, n, t)))) {
+        return error("Unauthorized", 401);
+      }
+      if (request.method === "DELETE") {
+        await this.ctx.storage.deleteAll();
+        await this.ctx.storage.deleteAlarm();
+        return json({ ok: true });
+      }
+      return json({ claimed: !!record.claimedAt, expiresAt: record.expiresAt });
+    }
+
+    return error("Not found", 404);
+  }
+
+  async alarm(): Promise<void> { await this.ctx.storage.deleteAll(); }
+}
 
 export class PairingSession extends DurableObject<Env> {
   private status(record: PairRecord) { const { creatorToken: _a, joinerToken: _b, ...safe } = record; return safe; }
@@ -717,12 +876,24 @@ export class ConversationRoom extends DurableObject<Env> {
     return verifyEcdsa(member.signPublicJwk, envelope.signature, envelopeText(envelope));
   }
 
-  private broadcast(payload: unknown, exceptDevice?: string): void {
+  /**
+   * Send to everyone connected, less whoever already has it.
+   *
+   * "Whoever already has it" used to mean a device id, and that was the same thing as a socket
+   * for as long as an identity had exactly one screen. It no longer is: a phone and a laptop
+   * share a device id, and the laptop very much wants the message the phone just sent. So a
+   * sender may name its own *socket* — the session it opened with — and only that one is skipped.
+   * Naming only the device still skips all of them, which is what a client that predates this
+   * does, and what typing and read receipts want anyway: you are not typing at yourself.
+   */
+  private broadcast(payload: unknown, except?: string | { deviceId: string; session?: string | null }): void {
     const text = JSON.stringify(payload);
+    const skipDevice = typeof except === "string" ? except : except?.deviceId;
+    const skipSession = typeof except === "string" ? null : except?.session ?? null;
     for (const ws of this.ctx.getWebSockets()) {
       try {
-        const attachment = (ws as WebSocket & { deserializeAttachment(): { deviceId?: string } }).deserializeAttachment?.();
-        if (exceptDevice && attachment?.deviceId === exceptDevice) continue;
+        const attachment = (ws as WebSocket & { deserializeAttachment(): { deviceId?: string; session?: string } }).deserializeAttachment?.();
+        if (skipDevice && attachment?.deviceId === skipDevice && (!skipSession || attachment?.session === skipSession)) continue;
         ws.send(text);
       } catch { /* a socket that died mid-broadcast is nothing we can do about here */ }
     }
@@ -766,7 +937,7 @@ export class ConversationRoom extends DurableObject<Env> {
   private async notifyOthers(senderDeviceId: string, conversationId: string): Promise<void> {
     if (!this.env.VAPID_PUBLIC_KEY || !this.env.VAPID_PRIVATE_KEY) return;
     const [subs, sender, meta] = await Promise.all([
-      this.ctx.storage.list<PushSubscriptionJSON>({ prefix: "push:" }),
+      this.ctx.storage.list<PushRecord>({ prefix: "push:" }),
       this.member(senderDeviceId),
       this.meta()
     ]);
@@ -781,7 +952,9 @@ export class ConversationRoom extends DurableObject<Env> {
       subject: this.env.VAPID_SUBJECT ?? "mailto:kin@example.invalid"
     };
     await Promise.allSettled([...subs.entries()].map(async ([key, sub]) => {
-      if (key === `push:${senderDeviceId}`) return;
+      // Every screen the sender has, not only the one they typed on: a laptop does not want a
+      // notification for a message it is already showing, and neither does the phone in the pocket.
+      if (key === `push:${senderDeviceId}` || key.startsWith(`push:${senderDeviceId}:`)) return;
       try {
         const res = await sendPushNotification(sub, payload, vapid, { ttl: 7 * 24 * 60 * 60, urgency: "high" });
         if (res.status === 404 || res.status === 410) await this.ctx.storage.delete(key);
@@ -930,7 +1103,10 @@ export class ConversationRoom extends DurableObject<Env> {
     // The last person out takes the room with them. Refusing instead stranded a group that was
     // made and never shared: its owner could not leave, and the app blamed the network for it.
     if (members.length <= 1) return this.disposeRoom();
-    await this.ctx.storage.delete([`member:${deviceId}`, `push:${deviceId}`]);
+    // Every endpoint the device holds, not just the one it registered before it had a second
+    // screen — an eviction that left one behind would go on pushing to the phone it removed.
+    const endpoints = [...(await this.ctx.storage.list({ prefix: `push:${deviceId}:` })).keys()];
+    await this.ctx.storage.delete([`member:${deviceId}`, `push:${deviceId}`, ...endpoints]);
     this.dropSockets(deviceId);
     this.broadcast({ kind: "member-removed", deviceId, byDeviceId: requester.deviceId });
     return json({ ok: true });
@@ -992,17 +1168,39 @@ export class ConversationRoom extends DurableObject<Env> {
     const envelope = await request.json() as Envelope;
     if (!(await this.verifyEnvelope(envelope))) return error("Invalid envelope", 401);
     if (await this.storeEnvelope(envelope, meta)) {
-      this.broadcast(envelope, envelope.senderDeviceId);
+      // The socket that sent it is the one screen that already has it. Every other socket of the
+      // same identity is a second device of the same person, and gets it live like anybody else.
+      this.broadcast(envelope, { deviceId: envelope.senderDeviceId, session: request.headers.get("X-Kin-Session") });
       this.ctx.waitUntil(this.notifyOthers(envelope.senderDeviceId, meta.id));
     }
     return json({ ok: true }, 202);
   }
 
+  /**
+   * Remember where to nudge this device, once per browser rather than once per identity.
+   *
+   * The key used to be `push:<deviceId>`, which was exactly right while an identity meant one
+   * browser: registering from a second one silently overwrote the first, so linking a laptop
+   * would have quietly turned the phone's notifications off. Each endpoint now gets its own row,
+   * capped, with the oldest let go when a browser mints endpoints faster than it retires them.
+   */
   private async registerPush(member: Member, body: string): Promise<Response> {
     let sub: PushSubscriptionJSON;
     try { sub = JSON.parse(body); } catch { return error("Invalid body"); }
     if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) return error("Invalid subscription");
-    await this.ctx.storage.put(`push:${member.deviceId}`, sub);
+    const slot = (await sha256b64(enc.encode(sub.endpoint))).slice(0, 22);
+    // The unslotted row this device wrote before Kin knew about second devices. Left behind it
+    // would go on being pushed to forever, and never be recognised as this endpoint again.
+    await this.ctx.storage.delete(`push:${member.deviceId}`);
+    await this.ctx.storage.put(`push:${member.deviceId}:${slot}`, { ...sub, at: Date.now() });
+    const mine = await this.ctx.storage.list<PushRecord>({ prefix: `push:${member.deviceId}:` });
+    if (mine.size > MAX_PUSH_PER_DEVICE) {
+      const oldest = [...mine.entries()]
+        .sort((a, b) => (a[1].at ?? 0) - (b[1].at ?? 0))
+        .slice(0, mine.size - MAX_PUSH_PER_DEVICE)
+        .map(([key]) => key);
+      await this.ctx.storage.delete(oldest);
+    }
     return json({ ok: true });
   }
 
@@ -1157,7 +1355,10 @@ export class ConversationRoom extends DurableObject<Env> {
       const pair = new WebSocketPair();
       const client = pair[0];
       const server = pair[1];
-      (server as WebSocket & { serializeAttachment(v: unknown): void }).serializeAttachment({ deviceId: member.deviceId });
+      // Advisory, not authenticated: all it ever decides is whether a socket is handed back its
+      // own message, and the only sockets it can silence are the sender's own.
+      const session = (url.searchParams.get("session") ?? "").slice(0, 64);
+      (server as WebSocket & { serializeAttachment(v: unknown): void }).serializeAttachment({ deviceId: member.deviceId, ...(session ? { session } : {}) });
       this.ctx.acceptWebSocket(server);
       return new Response(null, { status: 101, webSocket: client });
     }
