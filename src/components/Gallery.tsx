@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AttachmentPayload, ChatMessage, Conversation, LocalIdentity } from "../lib/types";
 import { scanMessages } from "../lib/db";
 import { cachedUrl, fmtDuration, fmtSize, isDoodle, mediaKind, resolveAttachment } from "../lib/media";
-import { extractLinks, linkHost, linkTail, withoutLinks } from "../lib/links";
+import { extractLinks, linkHost, linkTitle, linkWarning, shortLink, withoutLinks } from "../lib/links";
+import { AWAY, linkFace } from "./LinkCard";
 import { listStamp, monthLabel } from "../lib/format";
 
 export type GalleryTab = "photos" | "links" | "files";
@@ -173,17 +174,22 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
     {rows && tab === "links" && (links.length === 0
       ? <div className="hello-card">🔗<p>No links here yet — anything anybody sends turns up in here.</p></div>
       : <ul className="link-list">
-          {links.map(({ url, m, said }) => <li key={`${m.id}-${url}`}>
-            <a className="link-row" href={url} target="_blank" rel="noopener noreferrer">
-              <b aria-hidden>{linkHost(url).slice(0, 1).toUpperCase()}</b>
+          {links.map(({ url, m, said }) => {
+            // The address stays on its own line whatever else is known, so a list of links is
+            // still a list of where they go — the caption joins the name and the date below it.
+            const warn = linkWarning(url);
+            return <li key={`${m.id}-${url}`}>
+            <a className={`link-row ${warn ? "link-row-warn" : ""}`} href={url} title={warn ? `${url}\n\n${warn}` : url} {...AWAY}>
+              <b aria-hidden>{warn ? "⚠️" : linkFace(url)}</b>
               <span>
-                <strong>{linkHost(url)}</strong>
-                <em>{said || linkTail(url) || url}</em>
-                <small>{nameFor(m.senderDeviceId)} · {listStamp(m.createdAt)}</small>
+                <strong>{linkTitle(url) ?? linkHost(url)}</strong>
+                <em>{shortLink(url, 52)}</em>
+                <small>{said ? `“${said}” · ` : ""}{nameFor(m.senderDeviceId)} · {listStamp(m.createdAt)}</small>
               </span>
             </a>
             <button className="link-jump" onClick={() => onJump(m.id)} aria-label="Show in the conversation">↩</button>
-          </li>)}
+          </li>;
+          })}
         </ul>)}
     {rows && tab === "files" && (files.length === 0
       ? <div className="hello-card">📎<p>No files or voice notes here yet.</p></div>

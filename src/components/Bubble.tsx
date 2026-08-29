@@ -7,6 +7,7 @@ import { mediaKind, saveToDevice } from "../lib/media";
 import { buzz } from "../lib/sound";
 import { Avatar } from "./Avatar";
 import { ListCard } from "./ListCard";
+import { type JoinHandler, MessageText } from "./LinkCard";
 import { FileContent, ImageContent, useAttachmentUrl, VideoContent, VoiceContent } from "./Media";
 
 const REACTIONS = ["❤️", "😂", "👍", "🎉", "😮", "😢"];
@@ -25,7 +26,7 @@ function MediaBody({ att, identity, c, onOpenMedia }: { att: AttachmentPayload; 
 /** What a message is quoting, resolved by the caller since only it holds the whole thread. */
 export type QuotedMessage = { id: string; name: string; preview: string; gone: boolean };
 
-export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, entrance, list, pinned, canEdit, nameFor, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump, onPin, onDoodleOn, onListToggle, onListAdd, onListRemove }: {
+export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, entrance, list, pinned, canEdit, nameFor, onJoinKin, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump, onPin, onDoodleOn, onListToggle, onListAdd, onListRemove }: {
   m: ChatMessage; prev?: ChatMessage; me: string; identity: LocalIdentity; c: Conversation;
   reactions?: Record<string, string[]>; reacting: boolean; last: boolean; deleted: boolean;
   quoted?: QuotedMessage;
@@ -37,6 +38,8 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
   /** False for a viewer, who may look at a list but not tick it, and may not pin. */
   canEdit: boolean;
   nameFor(deviceId: string): string;
+  /** A Kin invite tapped in the thread opens here rather than in a browser tab. */
+  onJoinKin: JoinHandler;
   onReactBar(): void; onReact(emoji: string, at?: { x: number; y: number }): void;
   onOpenMedia(att: AttachmentPayload, url: string): void; onRetry(): void;
   onReply(): void; onCopy(): void; onDelete(): void; onJump(id: string): void;
@@ -67,8 +70,15 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
   const drawable = !deleted && m.payload.type === "file" && m.payload.attachment
     && mediaKind(m.payload.attachment) === "image" ? m.payload.attachment : null;
 
+  // A press that lands on a link belongs to the link: every platform answers a long press there
+  // with its own menu — open in a new tab, copy the *real* address — and that menu is the thing
+  // that makes a shortened link safe to show. Reacting is still a press anywhere else in the
+  // bubble, including the strip the timestamp sits in.
+  const onLink = (target: EventTarget | null): boolean =>
+    target instanceof Element && !!target.closest("a, .link-card, .link-inline");
+
   const startPress = (e: React.PointerEvent): void => {
-    if (e.button === 2 || deleted) return;
+    if (e.button === 2 || deleted || onLink(e.target)) return;
     press.current = window.setTimeout(() => { press.current = null; onReactBar(); buzz(10); }, 420);
   };
   const endPress = (): void => { if (press.current) { clearTimeout(press.current); press.current = null; } };
@@ -90,7 +100,7 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
       </div>}
       <div ref={bubble} className={`bubble ${entrance ? "entering" : ""} ${deleted ? "deleted" : ""} ${big ? "big-emoji" : ""} ${!deleted && m.payload.type === "file" ? "media-bubble" : ""} ${!deleted && m.payload.type === "list" ? "list-bubble" : ""} ${pinned && !deleted ? "pinned-bubble" : ""} ${m.status === "sending" ? "pending" : ""} ${m.status === "failed" ? "failed" : ""} ${reacting ? "reacting" : ""}`}
         onPointerDown={startPress} onPointerUp={endPress} onPointerLeave={endPress} onPointerCancel={endPress}
-        onContextMenu={e => { e.preventDefault(); onReactBar(); }}
+        onContextMenu={e => { if (onLink(e.target)) return; e.preventDefault(); onReactBar(); }}
         onClick={() => { if (m.status === "failed") onRetry(); }}>
         {showName && sender && <small className="sender" style={{ color: personColour(sender.deviceId).name }}>{firstName(sender.displayName)}</small>}
         {quoted && !deleted && <button className="quote" onClick={e => { e.stopPropagation(); if (!quoted.gone) onJump(quoted.id); }}>
@@ -99,7 +109,9 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
         {deleted
           ? <span className="text gone-text">🚫 Message deleted</span>
           : <>
-            {m.payload.type === "text" && <span className="text">{m.payload.text}</span>}
+            {m.payload.type === "text" && (big
+              ? <span className="text">{m.payload.text}</span>
+              : <MessageText text={m.payload.text ?? ""} onJoin={onJoinKin}/>)}
             {m.payload.type === "file" && m.payload.attachment && <MediaBody att={m.payload.attachment} identity={identity} c={c} onOpenMedia={onOpenMedia}/>}
             {m.payload.type === "list" && list && <ListCard list={list} canEdit={canEdit} nameFor={nameFor}
               onToggle={onListToggle} onAdd={onListAdd} onRemove={onListRemove}/>}

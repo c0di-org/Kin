@@ -1731,6 +1731,7 @@ export default function App() {
               pinned={pins.includes(m.id)}
               canEdit={canPost(active)}
               nameFor={nameFor}
+              onJoinKin={(code, secret) => setInviteLanding({ code, secret })}
               onReactBar={() => setReactFor(x => x === m.id ? null : m.id)}
               onReact={(emoji, at) => void react(m, emoji, at)}
               onOpenMedia={(att, url) => setLightbox({ att, url })}
