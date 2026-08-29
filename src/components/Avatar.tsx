@@ -5,6 +5,8 @@ import { initials, personColour, seedEmoji } from "../lib/format";
 export function Avatar({ member, size = 44 }: { member: PublicMember; size?: number }) {
   const emoji = seedEmoji(member.avatarSeed);
   // Keyed on the device, not the animal: two people who both picked the fox still read apart.
+  // The circle keeps the animal inside it by way of `line-height: normal` on `.avatar` — see the
+  // note there; the ratio below is only how big it is, not whether it fits.
   return <span className="avatar" style={{ width: size, height: size, fontSize: emoji ? size * 0.56 : size * 0.36, background: personColour(member.deviceId).bg }}>
     {emoji ?? initials(member.displayName)}
   </span>;

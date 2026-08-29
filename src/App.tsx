@@ -96,6 +96,15 @@ export default function App() {
   const [recent, setRecent] = useState<Record<string, ChatMessage[]>>({});
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   /**
+   * Pictures pasted into the chat, waiting on the send button.
+   *
+   * Staged rather than sent on the spot, because a paste is not a decision — it is halfway
+   * through one. A screenshot goes out with "look at this" after it, and a wrong one wants
+   * taking back before anybody sees it rather than after. The object urls are ours to revoke,
+   * which is why they live in state next to the file instead of being made at render time.
+   */
+  const [staged, setStaged] = useState<{ id: string; file: File; url: string | null }[]>([]);
+  /**
    * The picture the doodle pad is currently opened on top of, if any.
    *
    * The url is an object url for a blob already on this device, resolved before the pad opens —
@@ -623,7 +632,9 @@ export default function App() {
       setReadMark(conv && (conv.unread ?? 0) > 0 ? conv.lastReadAt ?? null : null);
       await markRead(activeId);
     })();
-    setTyping([]); setReactFor(null); setReplyTo(null); setConfirming(null); setEntering(new Set());
+    // Staged pictures do not follow you into another chat. A draft that ends up in the wrong
+    // room is a typo; a photo that does is something else.
+    setTyping([]); setReactFor(null); setReplyTo(null); setConfirming(null); setEntering(new Set()); clearStaged();
     const onVisible = () => { if (!document.hidden && activeIdRef.current === activeId) void markRead(activeId); };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
@@ -719,15 +730,78 @@ export default function App() {
     } catch { /* the room finds out from the roster instead */ }
   }
 
-  async function sendText(): Promise<void> {
-    const text = draft.trim(); if (!text || !active) return;
+  /** Put files on the shelf above the composer, previewing the ones that can be looked at. */
+  function stageFiles(files: File[]): void {
+    const wanted = files.filter(f => f.size <= MAX_FILE);
+    if (wanted.length < files.length) flash("That’s too big — 25 MB max");
+    if (!wanted.length) return;
+    setStaged(x => [...x, ...wanted.map(file => ({
+      id: randomId(), file,
+      url: file.type.startsWith("image/") ? URL.createObjectURL(file) : null
+    }))]);
+  }
+
+  // The revoke happens out here rather than inside the updater: a state updater is called during
+  // render and may be called twice, and freeing a url is not a thing to do twice by accident.
+  function unstage(id: string): void {
+    const going = staged.find(s => s.id === id);
+    if (going?.url) URL.revokeObjectURL(going.url);
+    setStaged(x => x.filter(s => s.id !== id));
+  }
+
+  function clearStaged(): void {
+    staged.forEach(s => s.url && URL.revokeObjectURL(s.url));
+    setStaged([]);
+  }
+
+  /**
+   * Paste a picture straight into the conversation.
+   *
+   * Listened for on the window rather than on the textarea: on a laptop the reflex is Cmd-V at
+   * whatever is on screen, and the composer is often not the focused thing when a screenshot has
+   * just been taken. Only files are taken — anything else is left to paste as text, including
+   * the plain-text half that a webpage image usually arrives alongside.
+   */
+  useEffect(() => {
+    // Not while a sheet is open, and not mid-recording: both would stage a picture onto a shelf
+    // that is not on screen, and a paste you cannot see is a paste you have lost.
+    if (!active || !canPost(active) || panel !== "none" || rec) return;
+    const onPaste = (e: ClipboardEvent): void => {
+      const files = [...(e.clipboardData?.files ?? [])];
+      if (!files.length) return;
+      e.preventDefault();
+      stageFiles(files);
+      composer.current?.focus();
+    };
+    addEventListener("paste", onPaste);
+    return () => removeEventListener("paste", onPaste);
+  }, [activeId, active?.role, active?.removedAt, panel, rec]);
+
+  /**
+   * Everything the composer is holding, in one go: the pictures first, then whatever was typed.
+   *
+   * Two messages rather than one because a file payload has nowhere to put a caption — see
+   * `Bubble`, which draws the picture and nothing else. Sending the picture first is the order
+   * somebody typing "look at this" means, and the order the thread reads in afterwards.
+   */
+  async function sendComposer(): Promise<void> {
+    const text = draft.trim();
+    const files = staged;
+    if (!active || (!text && !files.length)) return;
     const quoting = replyTo;
-    setDraft(""); setReplyTo(null);
+    setDraft(""); setReplyTo(null); setStaged([]);
     if (composer.current) composer.current.style.height = "";
     sync.sendTyping(active.id, false);
+    for (const [i, s] of files.entries()) {
+      // The reply is attached to the first thing out, so a pasted answer to somebody still
+      // points at what it is answering.
+      await sendFile(active, s.file, quoting && i === 0 ? { replyTo: quoting.id } : undefined);
+      if (s.url) URL.revokeObjectURL(s.url);
+    }
+    if (!text) return;
     sounds.send(); buzz(8);
     if (isCelebration(text)) { confetti(); sounds.tada(); }
-    await send(active, { type: "text", text, ...(quoting ? { replyTo: quoting.id } : {}) });
+    await send(active, { type: "text", text, ...(quoting && !files.length ? { replyTo: quoting.id } : {}) });
   }
 
   async function sendFile(conv: Conversation, file: File, extra?: { durationMs?: number; replyTo?: string }): Promise<void> {
@@ -1621,8 +1695,10 @@ export default function App() {
               ? <i className="unread">{elsewhere.count > 9 ? "9+" : elsewhere.count}</i>
               : elsewhere.nudge && <i className="unread quiet"/>}
           </button>}
-          {active.kind === "group" && isFullMember(active) &&
-            <button className="round" onClick={() => setPanel("invite")} aria-label="Invite">💌</button>}
+          {/* No invite button up here. It was the second round button in a 70px header, next to
+              the one that changes rooms, and the two read as a pair when only one of them is
+              something you do every day. Inviting somebody is a once-a-year act and it lives
+              where the group's other once-a-year acts live: tap the name, and it is in there. */}
         </header>
 
         {openSpace && <ChannelBar space={openSpace.space} channels={openSpace.channels} activeId={activeId}
@@ -1683,6 +1759,14 @@ export default function App() {
             <span><b>Replying to {nameFor(replyTo.senderDeviceId)}</b><em>{previewOf(replyTo.payload) || "Message"}</em></span>
             <button onClick={() => setReplyTo(null)} aria-label="Cancel reply">✕</button>
           </div>}
+          {staged.length > 0 && !rec && <div className="staged">
+            {staged.map(s => <span key={s.id} className="staged-item">
+              {s.url
+                ? <img src={s.url} alt={s.file.name}/>
+                : <b className="staged-file">{s.file.type.startsWith("video/") ? "🎬" : "📄"}<em>{s.file.name}</em></b>}
+              <button onClick={() => unstage(s.id)} aria-label={`Don’t send ${s.file.name}`}>✕</button>
+            </span>)}
+          </div>}
           <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden onChange={e => { const f = e.target.files?.[0]; if (f && active) void sendFile(active, f); e.currentTarget.value = ""; }}/>
           <input ref={mediaInput} type="file" accept="image/*,video/*" multiple hidden onChange={e => { const fs = [...(e.target.files ?? [])]; if (active) fs.forEach(f => void sendFile(active, f)); e.currentTarget.value = ""; }}/>
           <input ref={fileInput} type="file" hidden onChange={e => { const f = e.target.files?.[0]; if (f && active) void sendFile(active, f); e.currentTarget.value = ""; }}/>
@@ -1695,9 +1779,9 @@ export default function App() {
             <button className="composer-btn" onClick={() => { setDoodleOn(null); setPanel("doodle"); }} aria-label="Doodle">🖍️</button>
             <textarea ref={composer} rows={1} placeholder={`Message ${active.kind === "direct" ? firstName(active.title) : "everyone"}…`} value={draft}
               onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(130, e.target.scrollHeight)}px`; sync.sendTyping(active.id, !!e.target.value); }}
-              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendText(); } }}/>
-            {draft.trim()
-              ? <button className="send" onClick={() => void sendText()} aria-label="Send">↑</button>
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendComposer(); } }}/>
+            {draft.trim() || staged.length
+              ? <button className="send" onClick={() => void sendComposer()} aria-label="Send">↑</button>
               : <button className="composer-btn mic" onClick={() => void startRecording()} aria-label="Record voice note">🎤</button>}
           </>}
             </div>}
@@ -1758,6 +1842,7 @@ export default function App() {
         onNew={isFullMember(openSpace.space) ? () => { setNewIn(openSpace.space); setPanel("new"); } : undefined}/>}
       {panel === "gallery" && active && <Gallery identity={identity} conversation={active} deleted={deleted}
         tab={galleryTab} onTab={setGalleryTab} nameFor={nameFor}
+        onBack={() => setPanel("members")}
         onJump={id => { setPanel("none"); setTimeout(() => jumpTo(id), 60); }}
         onOpen={shot => void openFromGallery(shot.att)}
         onSave={att => void saveFromGallery(att)}/>}

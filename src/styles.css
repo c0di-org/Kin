@@ -320,7 +320,16 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .avatar {
   display: inline-grid; flex: none; place-items: center; border-radius: 50%;
   font-weight: 900; color: #3a3160; border: 2.5px solid rgba(255, 255, 255, .85);
-  line-height: 1; user-select: none;
+  user-select: none; overflow: hidden;
+  /* `line-height: 1` here, and the animal's ears came out of the top of the circle — sometimes.
+     An emoji font draws well above the em box (about 1.4em of ink for Noto's), so a 1em line box
+     centred in the circle puts the ink 7px high of centre and over the edge; whether it actually
+     showed depended on which bitmap strike the font size landed on, which is why it looked fine
+     in the group details at 44px and wrong in a chat header at 38px. `normal` makes the line box
+     the font's own ascent-to-descent, so centring the box centres the ink. The overflow rule is
+     the belt to that pair of braces: whatever a platform's emoji font does, it stays in the
+     circle. */
+  line-height: normal;
   box-shadow: inset 0 3px 6px rgba(255, 255, 255, .55), 0 4px 10px rgba(60, 55, 130, .16);
 }
 .stack { width: 54px; height: 54px; display: grid; grid-template-columns: repeat(2, 1fr); place-items: center; position: relative; flex: none; }
@@ -450,6 +459,27 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .reply-chip em { font-style: normal; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reply-chip button { margin-left: auto; width: 34px; height: 34px; flex: none; border-radius: 50%; color: var(--sub); font-size: 15px; }
 .reply-chip button:hover { background: var(--tint); }
+/* Pasted pictures, waiting on the send button. Same trick as the reply chip: a full-width row
+   ordered above the textarea inside the composer's own wrap, so the composer grows and the
+   message list's bottom padding follows it (the ResizeObserver in App measures the whole box). */
+.staged { flex-basis: 100%; order: -1; display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 4px 4px; }
+.staged-item { position: relative; display: block; }
+.staged-item img {
+  width: 74px; height: 74px; object-fit: cover; border-radius: 18px; display: block;
+  border: 1px solid var(--glass-line); box-shadow: var(--shadow);
+}
+.staged-file {
+  display: grid; place-items: center; gap: 2px; width: 74px; height: 74px; padding: 4px;
+  border-radius: 18px; background: var(--tint); font-size: 22px; box-shadow: var(--shadow);
+}
+.staged-file em { font-style: normal; font-size: 10.5px; font-weight: 800; color: var(--sub); max-width: 66px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.staged-item button {
+  position: absolute; top: -5px; right: -5px; width: 25px; height: 25px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 12px; font-weight: 900;
+  background: var(--paper); color: var(--sub); box-shadow: var(--shadow); border: 1px solid var(--glass-line);
+}
+.staged-item button:hover { color: var(--accent-ink); }
+
 .stamp { position: absolute; right: 13px; bottom: 6px; font-size: 11.5px; color: var(--sub); font-weight: 800; white-space: nowrap; }
 .mine .stamp { color: #fff; }
 .media-bubble .stamp { background: rgba(20, 15, 50, .66); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); color: #fff; padding: 3px 9px; border-radius: 999px; opacity: 1; }
@@ -672,6 +702,11 @@ button { border: 0; background: none; cursor: pointer; padding: 0; -webkit-tap-h
 .sheet-title { display: flex; align-items: center; justify-content: space-between; }
 .sheet-title h2 { margin-bottom: 10px; }
 .sheet-title button { width: 46px; height: 46px; border-radius: 50%; background: var(--grad-soft); font-size: 21px; border: 1px solid var(--glass-line); }
+/* A sheet opened from another sheet: the back button leads, and the title follows it rather than
+   being pushed to the far edge by the space-between above. */
+.sheet-title.with-back { justify-content: flex-start; gap: 10px; }
+.sheet-title.with-back h2 { margin-right: auto; }
+.sheet-back { color: var(--accent-ink); font-weight: 900; }
 /* Five across, on one row: wrapping left "File" sitting alone on a second line, which reads as
    a category of its own rather than the fifth of five equal things. */
 .attach-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; }

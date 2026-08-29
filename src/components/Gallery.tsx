@@ -72,7 +72,7 @@ function Tile({ identity, conversation, shot, onOpen }: {
  * fetch, no title lookup, no unfurl. See `lib/links.ts` for why that matters more here than the
  * prettier list it costs us.
  */
-export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, onSave, onJump, nameFor }: {
+export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, onSave, onJump, onBack, nameFor }: {
   identity: LocalIdentity;
   conversation: Conversation;
   /** Deletions folded out of the open thread, which the stored rows may not carry yet. */
@@ -83,6 +83,8 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
   /** Anything that is not a picture: the tap puts it on the device rather than on the screen. */
   onSave(att: AttachmentPayload): void;
   onJump(messageId: string): void;
+  /** Back to the group details this was opened from — see the header below for why it is here. */
+  onBack(): void;
   nameFor(deviceId: string): string;
 }) {
   const [rows, setRows] = useState<ChatMessage[] | null>(null);
@@ -140,6 +142,14 @@ export function Gallery({ identity, conversation, deleted, tab, onTab, onOpen, o
   const counted = (n: number): string => n > 99 ? "99+" : `${n}`;
 
   return <>
+    {/* This sheet is only ever reached from the group details, and the sheet's own handle closes
+        the lot. Without this, "photos" was a one-way door: the way back to the group you were
+        just looking at was to shut everything and start again. */}
+    <div className="sheet-title with-back">
+      <button className="sheet-back" onClick={onBack} aria-label={`Back to ${conversation.title}`}>←</button>
+      <h2>Photos &amp; links</h2>
+    </div>
+
     <div className="gallery-tabs" role="tablist">
       <button role="tab" aria-selected={tab === "photos"} className={tab === "photos" ? "on" : ""}
         onClick={() => onTab("photos")}>📷 Photos {rows && <i>{counted(shots.length)}</i>}</button>
