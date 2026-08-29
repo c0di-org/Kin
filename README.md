@@ -19,6 +19,7 @@ A tiny, private messenger for the people you actually know — a family, a trip,
 - Pairing by short code or QR is still there for adding someone stood next to you, ending on a safety check both phones work out for themselves from the keys they received.
 - Client-side encrypted text and encrypted file attachments.
 - Inline media: photos and videos render in the chat (with tiny encrypted blurred previews), voice notes get a player, everything else a file card. Decrypted media is cached locally in IndexedDB so it outlives the 7-day relay window.
+- Paste a picture straight into a conversation: it waits above the composer as a thumbnail you can take back off, so a screenshot can go out with a line of text after it rather than the instant it lands.
 - A crayon doodle pad for kids: draw and send, straight from the composer or the PWA app shortcut.
 - Tap-and-hold emoji reactions (delivered as encrypted events), giant emoji messages, confetti on celebrations, playful sounds and haptics.
 - Realtime everywhere: one WebSocket per conversation, so previews, unread counts (mirrored to the app badge), typing indicators, and read receipts (✓ / ✓✓) all update live.
