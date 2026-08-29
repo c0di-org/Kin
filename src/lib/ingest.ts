@@ -1,6 +1,7 @@
 import type { ChatMessage, ChatPayload, CipherEnvelope, Conversation, ListItem, PublicMember } from "./types";
 import { decryptPayload, verifyEnvelope } from "./crypto";
 import { knownSenders } from "./roster";
+import { summariseLinks } from "./links";
 import { previewLabel } from "./media";
 
 /** A message that verified and decrypted, alongside the roster entry that signed it. */
@@ -51,8 +52,15 @@ export function mergeMessages(existing: ChatMessage[], incoming: ChatMessage[]):
   return [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
 }
 
+/**
+ * One line standing in for a message: a sidebar row, a pinned strip, the chip above the composer.
+ *
+ * Links are collapsed to the site they point at. A summary line is a hundred-odd pixels wide, and
+ * a shared recipe used to fill all of it with "https://www.example.com/recipes/…?utm_source=" and
+ * say nothing about the conversation it belonged to.
+ */
 export function previewOf(payload: ChatPayload): string {
-  if (payload.type === "text") return payload.text ?? "";
+  if (payload.type === "text") return summariseLinks(payload.text ?? "");
   if (payload.type === "list") return `✅ ${payload.list?.title || "List"}`;
   return payload.attachment ? previewLabel(payload.attachment) : "";
 }
