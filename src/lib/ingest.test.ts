@@ -410,6 +410,51 @@ describe("previewOfEvent", () => {
   });
 });
 
+describe("summarize, in the room you keep for yourself", () => {
+  const notes: Conversation = { id: "self-1", kind: "group", title: "Just me", key: "k", members: [], createdAt: 0, self: true };
+  const opened = (id: string, createdAt: number, text = id, type: "text" | "event" = "text") => ({
+    sender: { deviceId: "me", displayName: "Alice", avatarSeed: "e:a", dhPublicJwk: {}, signPublicJwk: {} },
+    message: { id, conversationId: "self-1", senderDeviceId: "me", createdAt, payload: { type, text } }
+  } as any);
+
+  // The badge on the app icon is this number. A "1" for a link you pasted on your own laptop is
+  // a notification about yourself, which is the one kind nobody has ever wanted.
+  it("never counts an unread, however much arrives", () => {
+    const next = summarize(notes, [opened("a", 1), opened("b", 2), opened("c", 3)],
+      { myDeviceId: "me", activeAndVisible: false });
+    expect(next?.unread).toBe(0);
+  });
+
+  // Only the screen that did not write it gets this far: the one that did stored its own copy
+  // before the relay saw the envelope, and the ingest path skips ids already on disk.
+  it("shows a dot for a note that came from the other screen", () => {
+    expect(summarize(notes, [opened("a", 1)], { myDeviceId: "me", activeAndVisible: false })?.nudge).toBe(true);
+  });
+
+  it("says nothing while you are looking at it", () => {
+    expect(summarize(notes, [opened("a", 1)], { myDeviceId: "me", activeAndVisible: true })?.nudge).toBe(false);
+  });
+
+  it("says nothing about a note older than the last time this screen read the room", () => {
+    expect(summarize({ ...notes, lastReadAt: 50 }, [opened("a", 20)], { myDeviceId: "me", activeAndVisible: false })?.nudge).toBe(false);
+  });
+
+  it("still keeps the summary line current", () => {
+    const next = summarize(notes, [opened("a", 1, "wifi password")], { myDeviceId: "me", activeAndVisible: false });
+    expect(next?.lastPreview).toBe("wifi password");
+    expect(next?.lastMessageAt).toBe(1);
+  });
+
+  it("leaves an ordinary room counting unreads exactly as before", () => {
+    const conv: Conversation = { id: "room-1", kind: "group", title: "Family", key: "k", members: [], createdAt: 0 };
+    const fromThem = {
+      sender: { deviceId: "them", displayName: "Bob", avatarSeed: "e:b", dhPublicJwk: {}, signPublicJwk: {} },
+      message: { id: "x", conversationId: "room-1", senderDeviceId: "them", createdAt: 1, payload: { type: "text", text: "hi" } }
+    } as any;
+    expect(summarize(conv, [fromThem], { myDeviceId: "me", activeAndVisible: false })?.unread).toBe(1);
+  });
+});
+
 describe("summarize, on the things that are not messages", () => {
   const conv: Conversation = { id: "room-1", kind: "group", title: "Family", key: "k", members: [], createdAt: 0, lastReadAt: 100 };
   const sender = { deviceId: "mum", displayName: "Mum Jones", avatarSeed: "e:🐻", dhPublicJwk: {}, signPublicJwk: {} };

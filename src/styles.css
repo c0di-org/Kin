@@ -1567,3 +1567,96 @@ button.pinned-main:hover { background: rgba(255, 255, 255, .7); }
 .list-draft li span { min-width: 0; word-break: break-word; }
 .list-draft li button { margin-left: auto; flex: none; width: 32px; height: 32px; border-radius: 50%; color: var(--sub); font-size: 14px; }
 .list-draft li button:hover { background: rgba(192, 43, 70, .12); color: #c02b46; }
+
+/* ---------- Just me: the room you keep for yourself ---------- */
+/* It sits above the chat list rather than in it, so it never moves and never has to be found.
+   Warmer and flatter than a conversation row on purpose: it is a shelf, not a person. */
+.self-chip {
+  display: flex; align-items: center; gap: 12px; width: calc(100% - 8px); margin: 0 4px 10px;
+  padding: 9px 12px 9px 9px; border-radius: 24px; text-align: left;
+  background: linear-gradient(135deg, rgba(255, 214, 69, .22), rgba(255, 157, 77, .18));
+  border: 1px solid var(--glass-line); box-shadow: var(--gloss);
+  transition: transform .16s cubic-bezier(.3, 1.5, .5, 1), box-shadow .16s, background .16s;
+}
+.self-chip:hover { transform: translateY(-1px); box-shadow: var(--shadow), var(--gloss); }
+.self-chip:active { transform: scale(.98); }
+.self-chip.active {
+  background: linear-gradient(135deg, rgba(255, 214, 69, .42), rgba(255, 119, 189, .26));
+  box-shadow: var(--shadow), var(--gloss); border-color: rgba(255, 157, 77, .6);
+}
+.self-chip-face {
+  width: 40px; height: 40px; flex: none; border-radius: 50%; display: grid; place-items: center;
+  font-size: 21px; line-height: normal; background: var(--grad-warm); box-shadow: var(--gloss);
+}
+.self-chip-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.self-chip-body strong { font-size: 16px; font-weight: 900; }
+.self-chip-body small {
+  font-size: 12.5px; color: var(--sub); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The same face wherever the room is drawn as a conversation: the header, the share sheet. */
+.avatar.notes-face { background: var(--grad-warm); width: 52px; height: 52px; font-size: 27px; }
+.avatar.notes-face.small { width: 38px; height: 38px; font-size: 20px; }
+
+/* what an empty Just me says for itself */
+.notes-intro {
+  display: grid; justify-items: center; gap: 10px; text-align: center;
+  margin: 22px auto; padding: 26px 22px; max-width: 420px; border-radius: 32px;
+  background: var(--raised); border: 1px solid var(--glass-line); box-shadow: var(--shadow), var(--gloss);
+}
+.notes-intro-face {
+  width: 68px; height: 68px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 34px; line-height: normal; background: var(--grad-warm); box-shadow: var(--gloss);
+  animation: bob 3.6s ease-in-out infinite;
+}
+.notes-intro strong { font-size: 20px; font-weight: 1000; letter-spacing: -.2px; }
+.notes-intro p { margin: 0; font-size: 14.5px; line-height: 1.55; color: var(--sub); font-weight: 600; }
+.notes-chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 4px; }
+.notes-chips button {
+  padding: 11px 15px; border-radius: 18px; font-weight: 800; font-size: 14px;
+  background: var(--paper); border: 1px solid var(--glass-line); box-shadow: var(--shadow);
+  transition: transform .16s cubic-bezier(.3, 1.6, .5, 1);
+}
+.notes-chips button:hover { transform: translateY(-2px) scale(1.04); }
+.notes-chips button:active { transform: scale(.96); }
+.notes-hint {
+  margin-top: 6px; padding: 10px 12px; border-radius: 18px; text-align: center;
+  font-size: 12.5px; line-height: 1.5; color: var(--sub); font-weight: 600;
+  background: var(--tint); transition: background .16s;
+}
+.notes-hint:hover { background: rgba(124, 108, 255, .16); }
+.notes-hint b { color: var(--ink); font-weight: 800; }
+
+/* `.setting span` is `flex: none` because it is usually the emoji tile, and `.setting-body`
+   overrode its width and height but not that — so a subtitle longer than the row was clipped
+   rather than wrapped. Everything already in a settings sheet is short enough not to have
+   noticed. */
+.setting-body { flex: 1 1 auto !important; min-width: 0; }
+
+/* A note is not one side of a conversation, so it is not squeezed into one side of the screen.
+   Nothing here is waiting for a reply to sit opposite it, and a list or a long jotting wants the
+   room — 74% of the width exists to leave space for somebody else's bubbles. */
+.chat.is-self .bubble-wrap { max-width: min(88%, 620px); }
+
+/* where a kept copy came from, above whatever was kept */
+.kept-from {
+  display: block; font-size: 12px; font-weight: 800; opacity: .82; margin-bottom: 4px;
+}
+.kept-from b { font-weight: 900; }
+/* A media bubble pads itself down to almost nothing so the picture can reach its edges, which
+   left this label hard against the corner. Same inset the sender name gets there. */
+.bubble.media-bubble .kept-from { padding: 3px 9px 1px; }
+
+/* The warm tint that separates Just me from the chats is mostly yellow, which all but vanishes
+   over the night palette. Dark gets its own mix rather than the same one at a different opacity. */
+@media (prefers-color-scheme: dark) {
+  .self-chip {
+    background: linear-gradient(135deg, rgba(255, 193, 77, .20), rgba(255, 119, 189, .15));
+    border-color: rgba(255, 193, 77, .30);
+  }
+  .self-chip.active {
+    background: linear-gradient(135deg, rgba(255, 193, 77, .36), rgba(255, 119, 189, .26));
+    border-color: rgba(255, 193, 77, .58);
+  }
+  .notes-hint { background: rgba(150, 138, 255, .16); }
+}

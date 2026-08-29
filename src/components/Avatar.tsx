@@ -1,5 +1,6 @@
 import type { Conversation, PublicMember } from "../lib/types";
 import { initials, personColour, seedEmoji } from "../lib/format";
+import { NOTES_EMOJI } from "../lib/notes";
 
 /** A person, as a coloured circle holding either their chosen animal or their initials. */
 export function Avatar({ member, size = 44 }: { member: PublicMember; size?: number }) {
@@ -17,6 +18,9 @@ export function Mark() { return <span className="mark"><i/><i/><i/></span>; }
 
 /** A conversation, as the faces in it: one peer for a direct chat, a stack for a family. */
 export function ConversationAvatar({ c, self, small = false }: { c: Conversation; self: string; small?: boolean }) {
+  // Your own room draws as the thing it is for, rather than as your own face. A stack of one
+  // showing you back to yourself reads as a group you are the last one left in.
+  if (c.self) return <span className={`avatar notes-face ${small ? "small" : ""}`} aria-hidden>{NOTES_EMOJI}</span>;
   const peer = c.members.find(m => m.deviceId !== self) ?? c.members[0];
   if (c.kind === "direct") return peer ? <Avatar member={peer} size={small ? 38 : 52}/> : <span className="avatar"/>;
   const people = c.members.filter(m => m.deviceId !== self).slice(0, 3);

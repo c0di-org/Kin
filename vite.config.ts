@@ -37,6 +37,7 @@ export default defineConfig({
           { src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" }
         ],
         shortcuts: [
+          { name: "Note to self", short_name: "Just me", description: "Jot something down in the room you keep for yourself", url: "/?compose=note", icons: [{ src: "/icons/icon-192.png", sizes: "192x192" }] },
           { name: "New doodle", short_name: "Doodle", description: "Draw something for your family", url: "/?compose=doodle", icons: [{ src: "/icons/icon-192.png", sizes: "192x192" }] }
         ],
         share_target: {

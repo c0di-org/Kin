@@ -233,6 +233,14 @@ export function redact(m: ChatMessage): ChatMessage {
  * should not come home to a badge claiming twelve unread messages. A nudge is a dot: something
  * happened here, and it is not a message.
  *
+ * The room somebody keeps for themselves is the one place where "from somebody else" is the
+ * wrong question — everything in it is from them. What matters there is whether it came from
+ * *this* screen or the other one, and that is already known by the time this runs: the screen
+ * that sent it wrote its own copy before the relay saw the envelope, so anything reaching here
+ * arrived from somewhere else. It gets a dot and never a number. A badge on the app icon saying
+ * "1" for a link you yourself pasted on the laptop thirty seconds ago is a notification about
+ * yourself, which is the one kind nobody has ever wanted.
+ *
  * Returns null when the batch held nothing worth showing, so callers can skip the write entirely.
  */
 export function summarize(
@@ -245,10 +253,13 @@ export function summarize(
   const last = notable[notable.length - 1];
   if (!last) return null;
 
+  const unseen = (o: OpenedMessage): boolean => o.message.createdAt > (conv.lastReadAt ?? 0);
   const fromSomeoneNew = (o: OpenedMessage): boolean =>
-    o.message.senderDeviceId !== context.myDeviceId && o.message.createdAt > (conv.lastReadAt ?? 0);
-  const missed = context.activeAndVisible ? 0 : visible.filter(fromSomeoneNew).length;
-  const nudged = !context.activeAndVisible && notable.some(o => o.message.payload.type === "event" && fromSomeoneNew(o));
+    o.message.senderDeviceId !== context.myDeviceId && unseen(o);
+  const missed = context.activeAndVisible || conv.self ? 0 : visible.filter(fromSomeoneNew).length;
+  const nudged = !context.activeAndVisible && (conv.self
+    ? notable.some(unseen)
+    : notable.some(o => o.message.payload.type === "event" && fromSomeoneNew(o)));
   const mine = last.message.senderDeviceId === context.myDeviceId;
   const unread = (conv.unread ?? 0) + missed;
 

@@ -13,6 +13,7 @@ import {
 } from "./lib/spaces";
 import { deletedIds, firstName, foldLists, isSystemEvent, mergeMessages, pinnedIds, previewOf, previewOfEvent, redact } from "./lib/ingest";
 import { rememberDeparted } from "./lib/roster";
+import { ensureNotesRoom, keepable, keptCopy, NOTES_EMOJI, NOTES_TITLE } from "./lib/notes";
 import { dayLabel, greeting, listStamp } from "./lib/format";
 import { useConversationSync } from "./hooks/useConversationSync";
 import { buzz, setSoundsOn, sounds, soundsOn } from "./lib/sound";
@@ -39,6 +40,7 @@ import { Gallery, type GalleryTab } from "./components/Gallery";
 import { toneClass } from "./lib/tones";
 import { Sheet } from "./components/Sheet";
 import { SafetyCheck } from "./components/SafetyCheck";
+import { NotesIntro } from "./components/NotesIntro";
 
 type Panel = "none" | "pair" | "invite" | "join" | "members" | "settings" | "attach" | "add" | "doodle" | "profile" | "new" | "safety" | "list" | "edit" | "gallery" | "channels" | "devices";
 type InstallPrompt = Event & { prompt(): Promise<void> };
@@ -75,6 +77,15 @@ export default function App() {
   const [panel, setPanel] = useState<Panel>("none");
   const [pair, setPair] = useState<{ code: string; token: string; qr?: string; link?: string; safety?: string } | null>(null);
   const [joinCode, setJoinCode] = useState(new URLSearchParams(location.search).get("pair") ?? "");
+  /**
+   * What the app was launched with, read before anything has a chance to rewrite it.
+   *
+   * Boot replaces the URL with `?conversation=…` so the back gesture has somewhere to go, and it
+   * does that before `ready` flips — so an effect reading `location.search` afterwards found a
+   * share, a shortcut or a compose target already gone. Captured in a state initialiser, which
+   * runs on the first render, ahead of every effect.
+   */
+  const [launch] = useState(() => new URLSearchParams(location.search));
   const [inviteLanding, setInviteLanding] = useState(() => parseInviteLink(location.hash));
   /** A link one of this person's own devices left, waiting to be picked up by this one. */
   const [linkLanding, setLinkLanding] = useState(() => parseDeviceLink(location.hash));
@@ -133,6 +144,11 @@ export default function App() {
   const directCache = useRef(new Map<string, { id: string; key: string }>());
   const probedAt = useRef(new Map<string, number>());
   const sweeping = useRef(false);
+  /** Whatever the app was launched to do, done once — the effect below re-runs as rooms arrive. */
+  const launched = useRef(false);
+  // Whether the relay has confirmed the room this person keeps for themselves. Local rows are
+  // written whether or not it has, so the sweep keeps asking until it lands.
+  const notesReady = useRef(false);
   // The device-sync trio: whether this session has read the other screen's picture yet, what it
   // last saw or wrote, and a guard so two sweeps do not publish over each other.
   const pulledDevices = useRef(false);
@@ -219,6 +235,10 @@ export default function App() {
    */
   function landingConversation(cs: Conversation[], home: string | null): string | null {
     if (home && cs.some(c => c.id === home)) return home;
+    // Never the room you keep for yourself, however recently you wrote in it. Kin opens into the
+    // place other people are, and a notepad that grabbed the front door because you saved a link
+    // on the way to bed would put your own handwriting between you and your family every morning.
+    cs = cs.filter(c => !c.self);
     const spaces = cs.filter(c => c.kind === "group" && !c.spaceId);
     const oldest = [...spaces].sort((a, b) => a.createdAt - b.createdAt)[0];
     return oldest?.id ?? [...cs].sort((a, b) => (b.lastMessageAt ?? b.createdAt) - (a.lastMessageAt ?? a.createdAt))[0]?.id ?? null;
@@ -244,6 +264,7 @@ export default function App() {
         history.pushState({ conversationId: landing }, "", `${location.pathname}?conversation=${encodeURIComponent(landing)}`);
       }
       setActiveId(landing);
+      if (id) void ensureNotes();
       if (id && joinCode) setPanel("join");
       setReady(true);
       setPushStatus(await currentPushStatus());
@@ -285,13 +306,30 @@ export default function App() {
 
   // ---------- deep links: share target + shortcuts ----------
   useEffect(() => {
-    if (!ready || !identity) return;
-    const q = new URLSearchParams(location.search);
-    if (q.get("shared") === "1") void intakeShare();
-    if (q.get("compose") === "doodle" && conversations.length) {
+    if (!ready || !identity || launched.current) return;
+    if (launch.get("shared") === "1") {
+      launched.current = true;
+      return void intakeShare();
+    }
+    // Nothing here drops the launch query afterwards: boot already rewrote the URL to the room
+    // it opened into, and writing it again from `activeIdRef` — which the openChat above has not
+    // reached yet — would leave the address bar naming a different room than the one on screen.
+    if (launch.get("compose") === "doodle" && conversations.length) {
+      launched.current = true;
       openChat(activeIdRef.current ?? conversations[0].id);
       setPanel("doodle");
-      dropLaunchQuery();
+      return;
+    }
+    // The app-icon shortcut for "I need to write this down before I forget it". It opens the one
+    // room that needs no deciding who it is for, which is the whole point of the gesture.
+    if (launch.get("compose") === "note") {
+      // Not derived yet on a first run — this effect runs again the moment the row lands.
+      const mine = conversations.find(c => c.self);
+      if (!mine) return;
+      launched.current = true;
+      openChat(mine.id);
+      setPanel("none");
+      setTimeout(() => composer.current?.focus(), 240);
     }
   }, [ready, identity?.deviceId, conversations.length]);
 
@@ -438,6 +476,39 @@ export default function App() {
   }
   useEffect(() => { discoverRef.current = () => void discoverDirectChats(true); });
 
+  // ---------- the room you keep for yourself ----------
+  /**
+   * Make sure Just me exists on this device, and on the relay.
+   *
+   * Derived rather than created, so this is the same three lines on a phone that has had it for
+   * a year and on a laptop that was linked ninety seconds ago — both compute the same room out
+   * of the identity they share, and neither has to be told about it by the other. Which is also
+   * why it is not in the device snapshot: there is nothing to send.
+   *
+   * Run on the way in and again on the sweep until the relay has confirmed it, because the local
+   * row is written either way. A note typed before the room exists fails to send, sits there as
+   * failed, and goes out with everything else the moment the flush finds a room to send it to.
+   */
+  async function ensureNotes(): Promise<void> {
+    const me = identityRef.current;
+    if (!me) return;
+    try {
+      const { conversation, reachedRelay } = await ensureNotesRoom(me, await listConversations());
+      notesReady.current = reachedRelay;
+      const held = (await listConversations()).find(c => c.id === conversation.id);
+      // Only write when something actually differs, or every sweep would rewrite the row and
+      // re-render the whole sidebar for nothing.
+      // `removedAt` and `role` are in here as insurance rather than because anything sets them:
+      // either one would leave the composer read-only for good in a room nobody can be let into
+      // or thrown out of, and this is the only line that could ever clear them.
+      if (!held || !held.self || held.removedAt || held.role
+        || held.key !== conversation.key || held.title !== conversation.title) {
+        await putConversation(conversation);
+        await refresh();
+      }
+    } catch { /* no private key, or the database is unavailable — the next sweep tries again */ }
+  }
+
   // ---------- this person's other devices ----------
   /**
    * Kin on a laptop as well as a phone.
@@ -574,7 +645,12 @@ export default function App() {
     setIdentity(bundle.identity);
     setHomeId(bundle.home);
     clearLinkLanding();
+    notesReady.current = false;
     await pullDevices();
+    // Everything this person has ever kept for themselves is waiting in a room this screen can
+    // work out for itself, so it is derived here rather than pulled — and the socket brings the
+    // notes down the same way it brings any other room's history.
+    await ensureNotes();
     const cs = await listConversations();
     setConversations(cs);
     openChat(landingConversation(cs, bundle.home));
@@ -595,6 +671,7 @@ export default function App() {
       void discoverDirectChats(force);
       void sweepChannels();
       void syncDevices();
+      if (!notesReady.current) void ensureNotes();
       void flushFailed();
     };
     sweep(true);
@@ -804,7 +881,7 @@ export default function App() {
     await send(active, { type: "text", text, ...(quoting && !files.length ? { replyTo: quoting.id } : {}) });
   }
 
-  async function sendFile(conv: Conversation, file: File, extra?: { durationMs?: number; replyTo?: string }): Promise<void> {
+  async function sendFile(conv: Conversation, file: File, extra?: { durationMs?: number; replyTo?: string; kept?: { from: string } }): Promise<void> {
     const me = identityRef.current; if (!me) return;
     if (file.size > MAX_FILE) return flash("That’s too big — 25 MB max");
     const mime = file.type || "application/octet-stream";
@@ -821,8 +898,11 @@ export default function App() {
       ...(extra?.durationMs ? { durationMs: extra.durationMs } : {})
     };
     sounds.send(); buzz(8);
-    await send(conv, { type: "file", attachment, ...(extra?.replyTo ? { replyTo: extra.replyTo } : {}) }, () =>
-      uploadEncryptedFile(me, conv.id, fileId, encrypted.ciphertext, encrypted.sha256));
+    await send(conv, {
+      type: "file", attachment,
+      ...(extra?.replyTo ? { replyTo: extra.replyTo } : {}),
+      ...(extra?.kept ? { kept: extra.kept } : {})
+    }, () => uploadEncryptedFile(me, conv.id, fileId, encrypted.ciphertext, encrypted.sha256));
   }
 
   /**
@@ -880,6 +960,77 @@ export default function App() {
     if (m.payload.type !== "text" || !m.payload.text) return;
     try { await navigator.clipboard.writeText(m.payload.text); flash("Copied 📋"); }
     catch { flash("Couldn’t copy that"); }
+  }
+
+  /**
+   * Keep a copy of something in the room you keep for yourself.
+   *
+   * Exactly one copy, and only in there. Nothing is sent to the room it came out of — no event,
+   * no reaction, no "saved" marker — because a family chat should not learn what somebody
+   * bookmarked out of it, and because a second message is precisely the doubling this whole
+   * feature has to avoid. The original is not touched at all.
+   *
+   * An attachment is re-sent from the bytes rather than referred to: the relay files an encrypted
+   * file under the room it was uploaded to and will not hand it to another one, so a payload
+   * pointing back at the old room would be a photo that fell off the relay in a week — in a room
+   * whose entire promise is that things stay. Fetching it first is what makes keeping a photo
+   * from last summer work rather than silently keeping a broken card.
+   */
+  async function keepInNotes(m: ChatMessage): Promise<void> {
+    const me = identityRef.current;
+    const source = active;
+    setReactFor(null);
+    if (!me || !source || source.self) return;
+    const notes = (await listConversations()).find(c => c.self);
+    if (!notes) return flash("Your own room isn’t ready yet — try again in a moment");
+    const copy = keptCopy(m, source.title, deleted.has(m.id));
+    if (!copy) return flash("There’s nothing to keep in that one");
+    try {
+      if (copy.kind === "attachment") {
+        flash("Keeping it…");
+        if (!(await resolveAttachment(me, source, copy.attachment))) {
+          return flash("Couldn’t keep that one — it may be off the relay by now");
+        }
+        const stored = await getBlob(copy.attachment.fileId);
+        if (!stored) return flash("Couldn’t keep that one");
+        await sendFile(notes, new File([stored.bytes], stored.name || copy.attachment.name, { type: stored.mime }),
+          { ...(copy.attachment.durationMs ? { durationMs: copy.attachment.durationMs } : {}), kept: { from: copy.from } });
+      } else {
+        sounds.send(); buzz(8);
+        await send(notes, copy.payload);
+      }
+      flash(`Kept in ${NOTES_TITLE} ${NOTES_EMOJI}`);
+    } catch { flash("Couldn’t keep that one"); }
+  }
+
+  /**
+   * Empty the room you keep for yourself, without deleting the room.
+   *
+   * Off the relay as well as off this device, so a note taken back is taken back on the laptop
+   * too rather than pulled down again by the next history replay. The row itself stays: it is
+   * derived from the identity, so deleting it would only mean deriving it again a second later,
+   * with a tombstone left behind to argue with.
+   */
+  async function clearNotes(conv: Conversation): Promise<void> {
+    const me = identityRef.current;
+    if (!me || busy) return;
+    setBusy(true);
+    try {
+      const held = await listMessages(conv.id, Number.MAX_SAFE_INTEGER);
+      await Promise.allSettled(held.flatMap(m => [
+        dropEnvelope(me, conv.id, m.id),
+        ...(m.payload.attachment ? [dropEncryptedFile(me, conv.id, m.payload.attachment.fileId)] : [])
+      ]));
+      await deleteConversation(conv.id);
+      // Put the room straight back, minus everything the row remembered about what was in it.
+      const { lastPreview: _p, lastPreviewSender: _s, lastMessageAt: _at, unread: _u, nudge: _n, ...bare } = conv;
+      await putConversation({ ...bare, lastReadAt: Date.now() });
+      setMessages(x => ({ ...x, [conv.id]: [] }));
+      setConfirming(null); setPanel("none");
+      await refresh();
+      flash("Emptied — that’s a clean page");
+    } catch { flash("Couldn’t empty that — are you online?"); }
+    finally { setBusy(false); }
   }
 
   /**
@@ -1212,7 +1363,7 @@ export default function App() {
     let pruned = false;
     let refaced = false;
     for (const space of convs) {
-      if (space.kind !== "group" || space.spaceId) continue;
+      if (space.kind !== "group" || space.spaceId || space.self) continue;
       try {
         const { joined, renamed, present } = await discoverChannels(me, space, known);
         for (const channel of joined) {
@@ -1490,7 +1641,12 @@ export default function App() {
       nudge: rooms.some(c => c.nudge)
     };
   }, [openSpace, activeId]);
-  const showCards = sorted.length > 0 && sorted.length <= 3
+  /** The room this person keeps for themselves, once it exists. Its own slot, never in the list. */
+  const notes = tree.self;
+  // Big friendly cards are for a family and a chat or two. Your own room is not one of those and
+  // must not count towards the three, or making Just me would quietly turn the cards into a list.
+  const listed = useMemo(() => sorted.filter(c => !c.self), [sorted]);
+  const showCards = listed.length > 0 && listed.length <= 3
     && !tree.orphans.length && tree.spaces.every(n => !n.channels.length);
   // Reload on every conversation refresh rather than off a digest: a chat can gain messages without
   // its summary changing (history arriving for a chat we just discovered, for one).
@@ -1498,12 +1654,12 @@ export default function App() {
     if (!showCards) return;
     let live = true;
     void (async () => {
-      const rows = await Promise.all(sorted.map(async c =>
+      const rows = await Promise.all(listed.map(async c =>
         [c.id, (await listMessages(c.id)).filter(m => m.payload.type !== "event").slice(-3)] as const));
       if (live) setRecent(Object.fromEntries(rows));
     })();
     return () => { live = false; };
-  }, [showCards, sorted]);
+  }, [showCards, listed]);
 
   // A tombstone that leaves the text sitting in IndexedDB is not a deletion. Redacting the stored
   // copy also makes it stick: the envelope stays on the relay for its seven days, but a replay
@@ -1637,8 +1793,20 @@ export default function App() {
         <button className="round" onClick={() => setPanel("settings")} aria-label="Settings"><Avatar member={publicMember(identity)} size={38}/></button>
       </header>
       <p className="greeting">{greeting()} <b>{firstName(identity.displayName)}</b></p>
+      {/* Above the list rather than in it, and in the same place whether there are two chats or
+          twenty. A thing you reach for a dozen times a day should never have to be looked for,
+          and sorted in among the families it would shuffle them down a row every time you saved
+          a link. */}
+      {notes && <button className={`self-chip ${notes.id === activeId ? "active" : ""}`} onClick={() => openChat(notes.id)}>
+        <span className="self-chip-face" aria-hidden>{NOTES_EMOJI}</span>
+        <span className="self-chip-body">
+          <strong>{NOTES_TITLE}</strong>
+          <small>{notes.lastPreview || "Notes, links and things to keep"}</small>
+        </span>
+        {notes.nudge && <i className="unread quiet" aria-label="Something new from your other screen"/>}
+      </button>}
       <div className={`conversation-list ${showCards ? "as-cards" : ""}`}>
-        {showCards && sorted.map(c => <FamilyCard key={c.id} c={c} self={identity.deviceId} active={c.id === activeId}
+        {showCards && listed.map(c => <FamilyCard key={c.id} c={c} self={identity.deviceId} active={c.id === activeId}
           recent={recent[c.id] ?? []} onOpen={() => openChat(c.id)}
           onInvite={() => { openChat(c.id); void startPairing(c); }}/>)}
         {!showCards && <>
@@ -1666,7 +1834,7 @@ export default function App() {
       <button className="new-chat" onClick={() => setPanel("add")} aria-label="Add">+</button>
     </aside>
 
-    <main className={`chat ${toneClass(active?.color)} ${active ? "open" : ""}`}>
+    <main className={`chat ${toneClass(active?.color)} ${active?.self ? "is-self" : ""} ${active ? "open" : ""}`}>
       {active ? <>
         <header className="chat-head">
           <button className="back" onClick={() => openChat(null)} aria-label="Back">
@@ -1675,10 +1843,12 @@ export default function App() {
           <button className="chat-person" onClick={() => { setConfirming(null); setPanel("members"); }}>
             <ConversationAvatar c={active} self={identity.deviceId} small/>
             <span>
-              <strong>{active.kind === "group" ? `${active.title} ${active.emoji ?? "🏡"}` : active.title}</strong>
+              <strong>{active.kind === "group" && !active.self ? `${active.title} ${active.emoji ?? "🏡"}` : active.title}</strong>
               <small>{typingNames.length
                 ? typingSays
-                : active.spaceId
+                : active.self
+                  ? "Only you · on every screen you use Kin on"
+                  : active.spaceId
                   ? `${conversations.find(c => c.id === active.spaceId)?.title ?? "Channel"} · ${active.members.length}`
                   : active.kind === "group" ? active.members.map(m => firstName(m.displayName)).join(", ") : "Private chat"}</small>
             </span>
@@ -1708,13 +1878,18 @@ export default function App() {
           onJump={jumpTo} onUnpin={m => void togglePin(m, true)}/>
 
         <div className="messages" ref={scroll} onClick={() => setReactFor(null)}>
-          {active.kind === "group" && active.members.length === 1 && <div className="invite-card">
+          {active.self && threadLoaded && visible.length === 0 && <NotesIntro
+            onNote={() => composer.current?.focus()}
+            onList={() => setPanel("list")}
+            onPhoto={() => mediaInput.current?.click()}
+            onDevices={() => setPanel("devices")}/>}
+          {active.kind === "group" && !active.self && active.members.length === 1 && <div className="invite-card">
             <span className="invite-emoji">{active.emoji ?? "👋"}</span>
             <strong>It’s just you so far!</strong>
             <p>Send a link to whoever belongs here. It keeps working whether or not you’re online when they open it.</p>
             <button className="primary" onClick={() => setPanel("invite")}>Share a link 🔗</button>
           </div>}
-          {threadLoaded && visible.length === 0 && active.members.length > 1 && <div className="hello-card">👋<p>Say hi!</p></div>}
+          {threadLoaded && visible.length === 0 && !active.self && active.members.length > 1 && <div className="hello-card">👋<p>Say hi!</p></div>}
           {timeline.map((row, i) => {
             if (row.kind === "day") return <div className="day" key={`day-${row.at}-${i}`}><span>{dayLabel(row.at)}</span></div>;
             if (row.kind === "mark") return <div className="day unread-mark" key={`mark-${row.at}`}><span>New messages</span></div>;
@@ -1741,6 +1916,7 @@ export default function App() {
               onDelete={() => void deleteMessageForEveryone(m)}
               onJump={jumpTo}
               onPin={() => void togglePin(m, pins.includes(m.id))}
+              onKeep={notes && !active.self && !deleted.has(m.id) && keepable(m, false) ? () => void keepInNotes(m) : undefined}
               onDoodleOn={att => void startDoodleOn(m, att)}
               onListToggle={(itemId, done, text) => void tickItem(m.id, itemId, done, text)}
               onListAdd={text => void addListItem(m.id, text)}
@@ -1778,7 +1954,9 @@ export default function App() {
           </div> : <>
             <button className="composer-btn" onClick={() => setPanel("attach")} aria-label="Attach">＋</button>
             <button className="composer-btn" onClick={() => { setDoodleOn(null); setPanel("doodle"); }} aria-label="Doodle">🖍️</button>
-            <textarea ref={composer} rows={1} placeholder={`Message ${active.kind === "direct" ? firstName(active.title) : "everyone"}…`} value={draft}
+            <textarea ref={composer} rows={1} placeholder={active.self
+              ? "Note to self…"
+              : `Message ${active.kind === "direct" ? firstName(active.title) : "everyone"}…`} value={draft}
               onChange={e => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = `${Math.min(130, e.target.scrollHeight)}px`; sync.sendTyping(active.id, !!e.target.value); }}
               onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendComposer(); } }}/>
             {draft.trim() || staged.length
@@ -1802,8 +1980,10 @@ export default function App() {
     {shareIntake && <Sheet label="Send to" onClose={() => setShareIntake(null)}>
       <h2>Send to…</h2>
       <p className="sheet-sub">{shareIntake.files.length ? `${shareIntake.files.length} file${shareIntake.files.length > 1 ? "s" : ""} to share` : "Shared text"}</p>
-      {sorted.map(c => <button key={c.id} className="member" onClick={() => void deliverShare(c)}>
-        <ConversationAvatar c={c} self={identity.deviceId}/><span><strong>{c.title}</strong><small>{c.kind === "group" ? `${c.members.length} of you` : "Private chat"}</small></span>
+      {/* Your own room first, and it earns the place: most of what gets shared into a messenger
+          from somewhere else is being parked rather than passed on. */}
+      {[...(notes ? [notes] : []), ...listed].map(c => <button key={c.id} className="member" onClick={() => void deliverShare(c)}>
+        <ConversationAvatar c={c} self={identity.deviceId}/><span><strong>{c.title}</strong><small>{c.self ? "Keep it for yourself" : c.kind === "group" ? `${c.members.length} of you` : "Private chat"}</small></span>
       </button>)}
     </Sheet>}
 
@@ -1828,7 +2008,9 @@ export default function App() {
           <span className="member-emoji">{n.space.emoji ?? "🏡"}</span>
           <span><strong>New channel in {n.space.title}</strong><small>A room of its own inside the group</small></span>
         </button>)}
-        {sorted.filter(c => c.kind === "group" && isFullMember(c)).map(c => <button key={c.id} className="member"
+        {/* `listed` rather than every room: there is nobody to invite into the one you keep for
+            yourself, and offering it would be offering to end the only thing it is for. */}
+        {listed.filter(c => c.kind === "group" && isFullMember(c)).map(c => <button key={c.id} className="member"
           onClick={() => { openChat(c.id); setPanel("invite"); }}>
           <span className="member-emoji">🔗</span><span><strong>Invite to {c.title}</strong><small>Share a link that works whenever they open it</small></span>
         </button>)}
@@ -1869,7 +2051,36 @@ export default function App() {
         <input className="code-input" autoFocus placeholder="Invite code" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())} onKeyDown={e => e.key === "Enter" && void joinFamily(undefined, undefined, joinCode)}/>
         <button className="primary" onClick={() => void joinFamily(undefined, undefined, joinCode)}>Join 🎉</button>
       </>}
-      {panel === "members" && active && (active.kind === "group" ? <>
+      {panel === "members" && active && (active.self ? <>
+        <h2>{NOTES_TITLE} {NOTES_EMOJI}</h2>
+        <p className="sheet-sub">Nobody else is in here. It stays until you delete it — no seven-day sweep, no notification, no unread count for something you wrote yourself.</p>
+        <button className="setting" onClick={() => { setGalleryTab("photos"); setPanel("gallery"); }}>
+          <span>📷</span>
+          <span className="setting-body">
+            <strong>Photos &amp; links</strong>
+            <small>Everything you’ve kept here, without scrolling back through it</small>
+          </span>
+        </button>
+        <button className="setting" onClick={() => setPanel("devices")}>
+          <span>💻</span>
+          <span className="setting-body">
+            <strong>Your devices</strong>
+            <small>Link a laptop and this room is on that too</small>
+          </span>
+        </button>
+        <div className="sheet-foot">
+          <button className="danger-row" onClick={() => setConfirming(x => x === "empty" ? null : "empty")}>
+            <span>🧹</span>Empty this out
+          </button>
+          {confirming === "empty" && <div className="confirm">
+            <p><b>Empty {NOTES_TITLE}?</b> Every note, link and photo in here goes — off this device, off your other screens, and off the relay. There’s nobody else holding a copy, so this one is final.</p>
+            <div className="confirm-actions">
+              <button className="chip-btn" onClick={() => setConfirming(null)}>Keep it all</button>
+              <button className="danger-btn" disabled={busy} onClick={() => void clearNotes(active)}>Empty</button>
+            </div>
+          </div>}
+        </div>
+      </> : active.kind === "group" ? <>
         <div className="sheet-title">
           <h2>{active.title} {active.emoji ?? "🏡"}</h2>
           {isFullMember(active) && <button onClick={() => setPanel("edit")} aria-label="Edit this group">✏️</button>}

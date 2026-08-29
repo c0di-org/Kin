@@ -26,7 +26,7 @@ function MediaBody({ att, identity, c, onOpenMedia }: { att: AttachmentPayload; 
 /** What a message is quoting, resolved by the caller since only it holds the whole thread. */
 export type QuotedMessage = { id: string; name: string; preview: string; gone: boolean };
 
-export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, entrance, list, pinned, canEdit, nameFor, onJoinKin, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump, onPin, onDoodleOn, onListToggle, onListAdd, onListRemove }: {
+export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, deleted, quoted, entrance, list, pinned, canEdit, nameFor, onJoinKin, onReactBar, onReact, onOpenMedia, onRetry, onReply, onCopy, onDelete, onJump, onPin, onKeep, onDoodleOn, onListToggle, onListAdd, onListRemove }: {
   m: ChatMessage; prev?: ChatMessage; me: string; identity: LocalIdentity; c: Conversation;
   reactions?: Record<string, string[]>; reacting: boolean; last: boolean; deleted: boolean;
   quoted?: QuotedMessage;
@@ -43,14 +43,20 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
   onReactBar(): void; onReact(emoji: string, at?: { x: number; y: number }): void;
   onOpenMedia(att: AttachmentPayload, url: string): void; onRetry(): void;
   onReply(): void; onCopy(): void; onDelete(): void; onJump(id: string): void;
-  onPin(): void; onDoodleOn(att: AttachmentPayload): void;
+  onPin(): void;
+  /**
+   * Put a copy of this in the room you keep for yourself. Absent when there is nothing to keep,
+   * when this *is* that room, or when the message has been taken back.
+   */
+  onKeep?(): void;
+  onDoodleOn(att: AttachmentPayload): void;
   onListToggle(itemId: string, done: boolean, text: string): void;
   onListAdd(text: string): void; onListRemove(itemId: string, text: string): void;
 }) {
   const mine = m.senderDeviceId === me;
   const sender = c.members.find(x => x.deviceId === m.senderDeviceId);
   const grouped = !!prev && prev.senderDeviceId === m.senderDeviceId && m.createdAt - prev.createdAt < 5 * 60_000;
-  const showName = c.kind === "group" && !mine && !grouped;
+  const showName = c.kind === "group" && !c.self && !mine && !grouped;
   const press = useRef<number | null>(null);
   const bubble = useRef<HTMLDivElement>(null);
   // The bar opens above the message, where for the topmost message on screen there is nothing to
@@ -66,6 +72,7 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
   const chips = Object.entries(reactions ?? {}).filter(([, who]) => who.length > 0);
   const big = !deleted && m.payload.type === "text" && !!m.payload.text && emojiOnly(m.payload.text);
   const isText = m.payload.type === "text" && !!m.payload.text;
+  const kept = m.payload.kept;
   // A picture can be drawn on top of; a video or a voice note cannot.
   const drawable = !deleted && m.payload.type === "file" && m.payload.attachment
     && mediaKind(m.payload.attachment) === "image" ? m.payload.attachment : null;
@@ -84,7 +91,7 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
   const endPress = (): void => { if (press.current) { clearTimeout(press.current); press.current = null; } };
 
   return <div id={`msg-${m.id}`} className={`row ${mine ? "mine" : "theirs"} ${grouped ? "grouped" : ""}`}>
-    {c.kind === "group" && !mine && <span className="row-avatar">{!grouped && sender && <Avatar member={sender} size={30}/>}</span>}
+    {c.kind === "group" && !c.self && !mine && <span className="row-avatar">{!grouped && sender && <Avatar member={sender} size={30}/>}</span>}
     <div className="bubble-wrap" onClick={e => e.stopPropagation()}>
       {reacting && <div className={`react-bar ${below ? "below" : ""}`}>
         <div className="react-row">
@@ -95,6 +102,7 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
           {drawable && canEdit && <button onClick={() => onDoodleOn(drawable)}>🖍️ Doodle back</button>}
           {canEdit && <button onClick={onPin}>{pinned ? "📌 Unpin" : "📌 Pin"}</button>}
           {isText && <button onClick={onCopy}>📋 Copy</button>}
+          {onKeep && <button onClick={onKeep}>🔖 Keep</button>}
           {mine && <button className="act-danger" onClick={onDelete}>🗑 Delete</button>}
         </div>
       </div>}
@@ -103,6 +111,7 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
         onContextMenu={e => { if (onLink(e.target)) return; e.preventDefault(); onReactBar(); }}
         onClick={() => { if (m.status === "failed") onRetry(); }}>
         {showName && sender && <small className="sender" style={{ color: personColour(sender.deviceId).name }}>{firstName(sender.displayName)}</small>}
+        {kept && !deleted && <small className="kept-from">🔖 Kept from <b>{kept.from}</b></small>}
         {quoted && !deleted && <button className="quote" onClick={e => { e.stopPropagation(); if (!quoted.gone) onJump(quoted.id); }}>
           <b>{quoted.name}</b><em>{quoted.preview}</em>
         </button>}
@@ -116,7 +125,12 @@ export function Bubble({ m, prev, me, identity, c, reactions, reacting, last, de
             {m.payload.type === "list" && list && <ListCard list={list} canEdit={canEdit} nameFor={nameFor}
               onToggle={onListToggle} onAdd={onListAdd} onRemove={onListRemove}/>}
           </>}
-        <small className="stamp">{pinned && !deleted && <b className="stamp-pin" aria-label="Pinned">📌 </b>}{time(m.createdAt)}{mine && <b className={`tick ${m.status ?? ""}`}>{m.status === "failed" ? " ⚠ tap to retry" : m.status === "sending" ? " ◌" : m.status === "read" ? " ✓✓" : " ✓"}</b>}</small>
+        {/* A tick answers "did they get it". In the room you keep for yourself there is no they,
+            so only the two states that are still about the message survive: still going out, and
+            never went. A ✓✓ on a note to self is the app congratulating you for reading it. */}
+        <small className="stamp">{pinned && !deleted && <b className="stamp-pin" aria-label="Pinned">📌 </b>}{time(m.createdAt)}{mine && (c.self
+          ? (m.status === "failed" || m.status === "sending") && <b className={`tick ${m.status}`}>{m.status === "failed" ? " ⚠ tap to retry" : " ◌"}</b>
+          : <b className={`tick ${m.status ?? ""}`}>{m.status === "failed" ? " ⚠ tap to retry" : m.status === "sending" ? " ◌" : m.status === "read" ? " ✓✓" : " ✓"}</b>)}</small>
       </div>
       {chips.length > 0 && !deleted && <div className={`chips ${mine ? "chips-mine" : ""}`}>
         {chips.map(([emoji, who]) => <button key={emoji} className={who.includes(me) ? "me" : ""} onClick={e => onReact(emoji, { x: e.clientX, y: e.clientY })}>{emoji}{who.length > 1 && <b>{who.length}</b>}</button>)}

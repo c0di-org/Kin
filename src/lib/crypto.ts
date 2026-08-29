@@ -238,6 +238,24 @@ export async function selfRoom(identity: LocalIdentity): Promise<{ id: string; k
 }
 
 /**
+ * The room a person keeps for themselves.
+ *
+ * Derived exactly the way the sync room is — out of the identity's own private key, so nobody
+ * who has not got that key can name it, let alone read it — but under a different label and a
+ * different id string, and that separation is load-bearing rather than tidy. The sync room holds
+ * one picture of a device's rooms and *prunes every envelope but the newest* each time it is
+ * read; a note left in there would be swept away by the next sync. So notes get a room of their
+ * own, which is also what lets it be an ordinary conversation: sockets, history, attachments,
+ * reactions and pins all work in it because it is not special anywhere below this line.
+ */
+export async function selfNotesRoom(identity: LocalIdentity): Promise<{ id: string; key: string }> {
+  const seed = identity.dhPrivateJwk.d;
+  if (!seed) throw new Error("This identity has no private key");
+  const key = await deriveAesFrom(unb64(seed), "self-notes");
+  return { id: (await sha256(`kin-self-notes-room:${seed}`)).slice(0, 32), key: b64(await crypto.subtle.exportKey("raw", key)) };
+}
+
+/**
  * The two values a device-link secret produces, mirroring `inviteMaterial` exactly.
  *
  * The reasoning is the same and the stakes are higher: `proof` is what the relay checks and

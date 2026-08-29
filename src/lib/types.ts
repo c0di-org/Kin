@@ -63,6 +63,17 @@ export type Conversation = {
    * after seven days. What makes an album an album.
    */
   keep?: boolean;
+  /**
+   * The room this person keeps for themselves — notes, links, photos parked for later.
+   *
+   * A flag rather than a third `kind`, because underneath it is an ordinary group with one
+   * member in it and everything a room can do it can do: attachments, lists, pins, the gallery,
+   * a socket to this person's other screens. What the flag buys is the handful of places where
+   * "a group of one" would otherwise be drawn as a family waiting for somebody to arrive —
+   * invite cards, rosters, "leave this family" — and the ordering rules that keep it out of the
+   * way of the rooms other people are in.
+   */
+  self?: true;
   lastMessageAt?: number;
   lastPreview?: string;
   lastPreviewSender?: string;
@@ -114,6 +125,12 @@ export type ChatPayload = {
   attachment?: AttachmentPayload;
   list?: ListPayload;
   replyTo?: string;
+  /**
+   * Where a copy kept in your own room came from, so a line saved out of a conversation still
+   * says which conversation. Only ever set on the copy — keeping something does not touch, mark
+   * or notify the message it was taken from.
+   */
+  kept?: { from: string };
   event?: {
     /**
      * `pin`, `check`, `additem` and `removeitem` are folded at render time exactly the way
