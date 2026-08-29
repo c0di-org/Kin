@@ -76,6 +76,18 @@ export function roomFromSnapshot(row: SnapshotRoom, identity: LocalIdentity): Co
   };
 }
 
+/**
+ * Rooms worth describing to another screen: everything except the one that screen can work out
+ * for itself.
+ *
+ * The room somebody keeps for themselves is derived from their own private key, so a laptop
+ * holding the identity already holds the room — sending it would be sending a key it computed
+ * ten seconds ago. Leaving it out is not only tidiness: a room in the list is a room the
+ * tombstone rules apply to, and a notepad that could be taken off one screen by something said
+ * on another is a notepad with a way to lose things.
+ */
+const travels = (c: Conversation): boolean => !c.self;
+
 export function buildSnapshot(
   identity: LocalIdentity,
   conversations: Conversation[],
@@ -86,7 +98,7 @@ export function buildSnapshot(
     at: Date.now(),
     profile: { displayName: identity.displayName, avatarSeed: identity.avatarSeed, at: context.profileAt },
     home: context.home,
-    rooms: conversations.map(c => snapshotRoom(c, identity.deviceId)),
+    rooms: conversations.filter(travels).map(c => snapshotRoom(c, identity.deviceId)),
     gone: context.gone
   };
 }
@@ -123,6 +135,7 @@ export function applySnapshot(
     .map(r => roomFromSnapshot(r, identity));
 
   const remove = local
+    .filter(travels)
     .filter(c => !listed.has(c.id) && (gone[c.id] ?? 0) > c.createdAt)
     .map(c => c.id);
 

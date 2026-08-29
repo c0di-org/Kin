@@ -144,6 +144,23 @@ describe("arranging what a device holds", () => {
     id: "x", kind: "group", title: "T", key: "k", members: [], createdAt: 0, ...over
   } as Conversation);
 
+  // It is a group of one, so left in the list it would sort by whenever it was last written in —
+  // pushing the families down a row every time somebody saved a link on the way to bed.
+  it("takes the room you keep for yourself out of the list and hands it back on its own", () => {
+    const tree = spaceTree([
+      group({ id: "fam", title: "Family", lastMessageAt: 100 }),
+      group({ id: "mine", title: "Just me", self: true, lastMessageAt: 9_000 })
+    ]);
+    expect(tree.self?.id).toBe("mine");
+    expect(tree.spaces.map(n => n.space.id)).toEqual(["fam"]);
+    expect(tree.orphans).toEqual([]);
+    expect(tree.directs).toEqual([]);
+  });
+
+  it("hands back nothing for it when this device has not derived it yet", () => {
+    expect(spaceTree([group({ id: "fam" })]).self).toBeNull();
+  });
+
   it("leaves a group with no channels as one flat row", () => {
     const tree = spaceTree([group({ id: "fam", title: "Family" })]);
     expect(tree.spaces).toHaveLength(1);

@@ -282,18 +282,27 @@ const activity = (c: Conversation): number => c.lastMessageAt ?? c.createdAt;
  *
  * A channel whose space this device does not hold comes back as an orphan rather than being
  * dropped, because that is what being invited straight into one channel looks like from inside.
+ *
+ * The room somebody keeps for themselves comes back on its own, and never in the list. It is a
+ * group of one, so left where it fell it would sort in among the families by whenever it was
+ * last written in — pushing the people you actually talk to down a row every time you saved a
+ * link. It has a fixed place at the top instead, which is also the only place a thing you reach
+ * for a dozen times a day belongs.
  */
 export function spaceTree(conversations: Conversation[]): {
   spaces: SpaceNode[];
   directs: Conversation[];
   orphans: Conversation[];
+  self: Conversation | null;
 } {
   const spaces = new Map<string, SpaceNode>();
   const directs: Conversation[] = [];
   const channels: Conversation[] = [];
+  let self: Conversation | null = null;
 
   for (const c of conversations) {
-    if (c.kind === "direct") directs.push(c);
+    if (c.self) self ??= c;
+    else if (c.kind === "direct") directs.push(c);
     else if (c.spaceId) channels.push(c);
     else spaces.set(c.id, { space: c, channels: [], unread: c.unread ?? 0, lastMessageAt: activity(c) });
   }
@@ -311,7 +320,8 @@ export function spaceTree(conversations: Conversation[]): {
   return {
     spaces: [...spaces.values()].sort((a, b) => b.lastMessageAt - a.lastMessageAt),
     directs: directs.sort((a, b) => activity(b) - activity(a)),
-    orphans: orphans.sort((a, b) => activity(b) - activity(a))
+    orphans: orphans.sort((a, b) => activity(b) - activity(a)),
+    self
   };
 }
 

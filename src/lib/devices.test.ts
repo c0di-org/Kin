@@ -43,6 +43,24 @@ describe("what a room looks like on the way across", () => {
   });
 });
 
+describe("the room a person keeps for themselves", () => {
+  // It falls out of the identity's own private key, so a screen holding the identity already
+  // holds the room. Sending it would be sending a key the other side computed for itself.
+  it("is not described to the other screen, because the other screen derives it", () => {
+    const snapshot = snapshotOf([group("g1"), group("mine", { self: true })]);
+    expect(snapshot.rooms.map(r => r.id)).toEqual(["g1"]);
+  });
+
+  // A room in the list is a room the tombstone rules apply to, and a notepad that could be taken
+  // off one screen by something said on another is a notepad with a way to lose things.
+  it("is never removed by a snapshot that does not mention it", () => {
+    const mine = group("mine", { self: true });
+    const snapshot = { ...snapshotOf([group("g1")]), gone: { mine: 9_999 } };
+    const { remove } = applySnapshot(me, [group("g1"), mine], snapshot, { home: null, profileAt: 0 });
+    expect(remove).toEqual([]);
+  });
+});
+
 describe("folding another screen's picture into this one", () => {
   it("adds what this device has not got", () => {
     const { add, remove } = applySnapshot(me, [group("g1")], snapshotOf([group("g1"), group("g2")]), { home: null, profileAt: 0 });
