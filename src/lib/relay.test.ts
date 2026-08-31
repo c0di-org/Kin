@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addRoomMember, createRoom, downloadEncryptedFile, history, roomMembers, uploadEncryptedFile, websocketUrl } from "./relay";
+import { addRoomMember, createRoom, downloadEncryptedFile, history, removeRoomMember, roomMembers, uploadEncryptedFile, websocketUrl } from "./relay";
 import { generateIdentity, publicMember, sha256, unb64 } from "./crypto";
 import type { LocalIdentity } from "./types";
 
@@ -84,6 +84,32 @@ describe("signed relay requests", () => {
   it("throws the relay's message rather than swallowing a rejection", async () => {
     vi.stubGlobal("fetch", async () => new Response("Unauthorized", { status: 401 }));
     await expect(history(me, "room-1")).rejects.toThrow("Unauthorized");
+  });
+});
+
+describe("self-removal recovery", () => {
+  it("treats 401 as success when a lost response left the local room behind", async () => {
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, init, headers: new Headers(init.headers as HeadersInit) });
+      return new Response("Unauthorized", { status: 401 });
+    });
+
+    await expect(removeRoomMember(me, "room-1", me.deviceId)).resolves.toBeUndefined();
+    const [call] = calls;
+    const path = `/api/rooms/room-1/members/${encodeURIComponent(me.deviceId)}`;
+    expect(call.url).toBe(path);
+    expect(await verifySignature(me, call.headers, "DELETE", path)).toBe(true);
+  });
+
+  it("treats a vanished room as an already-finished self-removal", async () => {
+    vi.stubGlobal("fetch", async () => new Response("Room not found", { status: 404 }));
+    await expect(removeRoomMember(me, "room-1", me.deviceId)).resolves.toBeUndefined();
+  });
+
+  it("does not swallow the same rejection while removing somebody else", async () => {
+    const peer = await generateIdentity("Bob");
+    vi.stubGlobal("fetch", async () => new Response("Unauthorized", { status: 401 }));
+    await expect(removeRoomMember(me, "room-1", peer.deviceId)).rejects.toThrow("Unauthorized");
   });
 });
 
