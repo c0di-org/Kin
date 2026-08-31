@@ -20,9 +20,16 @@ function sessionId(): string {
   return (session ??= b64(crypto.getRandomValues(new Uint8Array(8))));
 }
 
+class RelayHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "RelayHttpError";
+  }
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${base}${path}`, init);
-  if (!res.ok) throw new Error((await res.text()) || `${res.status}`);
+  if (!res.ok) throw new RelayHttpError(res.status, (await res.text()) || `${res.status}`);
   return res.json() as Promise<T>;
 }
 
@@ -86,10 +93,24 @@ export async function addRoomMember(identity: LocalIdentity, roomId: string, mem
   const path = `/api/rooms/${encodeURIComponent(roomId)}/members`;
   await signedJson(identity, "POST", path, member);
 }
-/** Evict a device from a room. Removing yourself is how leaving a family works. */
+/**
+ * Evict a device from a room. Removing yourself is how leaving a family works.
+ *
+ * Self-removal is deliberately idempotent from the client's point of view. The relay deletes the
+ * member row before returning success; if that response is lost, this device keeps the local room
+ * and its next DELETE is authenticated against a roster it is no longer on, so the relay answers
+ * 401. A room that was closed by the first DELETE similarly answers 404. In either case there is
+ * nothing left for this identity to remove remotely, and treating it as success lets the caller
+ * finish the local deletion. We never soften an error while removing somebody else.
+ */
 export async function removeRoomMember(identity: LocalIdentity, roomId: string, deviceId: string): Promise<void> {
   const path = `/api/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(deviceId)}`;
-  await signedJson(identity, "DELETE", path);
+  try {
+    await signedJson(identity, "DELETE", path);
+  } catch (err) {
+    if (deviceId === identity.deviceId && err instanceof RelayHttpError && (err.status === 401 || err.status === 404)) return;
+    throw err;
+  }
 }
 export async function history(identity: LocalIdentity, roomId: string): Promise<CipherEnvelope[]> {
   const path = `/api/rooms/${encodeURIComponent(roomId)}/history`;
